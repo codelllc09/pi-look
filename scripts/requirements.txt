@@ -6,3 +6,8 @@
 pillow>=12.3,<13
 rapidocr-onnxruntime>=1.4.4,<1.5
 onnxruntime>=1.31,<2
+
+# Guaranteed-present (not imported by analyze.py): the model's bash-domain CV
+# work can rely on cv2 being here instead of probing or re-installing. New
+# detectors and heavier stacks stay on-demand installs in the bash domain.
+opencv-contrib-python-headless>=5.0,<6
