@@ -33,6 +33,7 @@ interface LookConfig {
 	minAutoConf: number;
 	vlmMaxTokens?: number; // default 8192; reasoning judges burn hidden tokens first
 	vlmThinking?: boolean; // default true; false sends thinking:disabled (faster, shallower)
+	vlmEndpoints?: Record<string, string>; // provider -> OpenAI-compatible chat endpoint; overrides the built-in fallback map
 }
 
 const DEFAULTS: LookConfig = {
@@ -104,8 +105,8 @@ async function callVLM(cfg: LookConfig, question: string, imgPath: string, groun
 	const slash = cfg.visionModel.indexOf("/");
 	const provider = cfg.visionModel.slice(0, slash);
 	const model = cfg.visionModel.slice(slash + 1);
-	const endpoint = ENDPOINTS[provider];
-	if (!endpoint) throw new Error(`no endpoint mapped for provider "${provider}" — add it in pi-look config or ENDPOINTS`);
+	const endpoint = cfg.vlmEndpoints?.[provider] ?? ENDPOINTS[provider];
+	if (!endpoint) throw new Error(`no endpoint for provider "${provider}" — set vlmEndpoints["${provider}"] in pi-look.json`);
 	const b64 = fs.readFileSync(imgPath).toString("base64");
 	const askOnce = async (maxTokens: number) => {
 		const body: Record<string, unknown> = {

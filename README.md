@@ -35,7 +35,8 @@ questions, with local-first lanes and a vision-model lane only when needed:
 {
   "visionModel": "zai-coding-cn/glm-5.3-flash",
   "pythonPath": "~/.virtualenvs/main/bin/python",
-  "minAutoConf": 0.3
+  "minAutoConf": 0.3,
+  "vlmEndpoints": { "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" }
 }
 ```
 
