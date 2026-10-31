@@ -24,8 +24,8 @@ questions, with local-first lanes and a vision-model lane only when needed:
   model has its own vision (`mode="vlm"` remains available as second opinion).
 - `mode="stats" | "ocr"` force a single lane. Useful even for vision models:
   exact numbers eyes estimate poorly (verbatim text, counts, colors).
-- Heavier CV (contours, template matching, detectors) stays in the model's
-  bash+python domain by design.
+- Heavier classical CV (contours, template matching, color segmentation,
+  connected components, etc.) stays in the model's bash+python domain by design.
 
 ## Config
 
@@ -45,7 +45,7 @@ logged. Endpoints are OpenAI-compatible; add providers in `ENDPOINTS`.
 ## Install
 
 Analyzer deps (Pillow = pixel stats lane, RapidOCR = OCR lane; heavier CV —
-opencv, detectors — is deliberately NOT a dependency, it stays in the model's
+opencv etc. — is deliberately NOT a dependency, it stays in the model's
 bash domain). Pinned in `scripts/requirements.txt` for fixture comparability:
 
 ```bash

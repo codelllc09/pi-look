@@ -166,7 +166,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "look",
 		description:
-			"Look at an image file through a three-lane pipeline. Useful even if you can already see images: the stats/OCR lanes give EXACT numbers your eyes estimate poorly (dimensions, colors, verbatim text, counts). Default (no mode): pixel stats + local OCR — cheap and local; check whether that answers your question before going further. mode='vlm' with a question: asks a vision model grounded with the local OCR — use for semantics ('what is this', shapes, UIs, likeness), when you cannot see images, or as a second opinion. mode='stats'/'ocr': force one lane. Heavier CV (contours, template matching, detectors) you can always write yourself in bash+python.",
+			"Look at an image file through a three-lane pipeline. Useful even if you can already see images: the stats/OCR lanes give EXACT numbers your eyes estimate poorly (dimensions, colors, verbatim text, counts). Default (no mode): pixel stats + local OCR — cheap and local; check whether that answers your question before going further. mode='vlm' with a question: asks a vision model grounded with the local OCR — use for semantics ('what is this', shapes, UIs, likeness), when you cannot see images, or as a second opinion. mode='stats'/'ocr': force one lane. Heavier classical CV (contours, template matching, color segmentation, connected components, etc.) you can always write yourself in bash+python.",
 		parameters: Type.Object({
 			path: Type.String({ description: "Image file path (png/jpg/webp/bmp)" }),
 			mode: Type.Optional(Type.String({ description: "Lane selection: auto (default) | stats | ocr | vlm" })),
