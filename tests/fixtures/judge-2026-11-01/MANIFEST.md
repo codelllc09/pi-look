@@ -9,3 +9,16 @@ of this commit for the generator inline). Known failure to regress:
 
 Ruling recorded: default judge = glm-5.3-flash (user config). Re-run this
 corpus when swapping judges; add every real-world misjudgment as a fixture.
+
+## Negative result (2026-11-01): OCR preprocessing rejected
+
+Tried pi-read-image-style preprocessing against the OOL fixture:
+- 2x LANCZOS upscale: still 00L, avgConf drops (0.98→0.962)
+- 2x + UnsharpMask: still 00L; on shape-only images flips recognition
+  ('V'→'7') — actively unstable on non-text content
+Pixel forensics: O vs 0 differ in 30.9% of pixels (max gray delta 237/255)
+— the information IS in the image; the failure belongs to the recognizer,
+not the data. Remaining fix paths: engine swap, or context-aware post
+correction (model domain — note glm-5.3-flash and 4.6v also misread it,
+so treat O/0 as a shared known limitation, not a RapidOCR-specific bug).
+Do not re-try preprocessing variants without new evidence.
