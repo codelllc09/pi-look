@@ -44,6 +44,11 @@ class AnalyzerTests(unittest.TestCase):
             self.assertGreaterEqual(len(r["ocr"]["lines"]), 2)
             self.assertGreater(r["ocr"]["avgConf"], 0.5)
             self.assertIn("pi-look", r["ocr"]["text"])
+            for line in r["ocr"]["lines"]:
+                self.assertIn("box", line, "every OCR line must carry a box")
+                x1, y1, x2, y2 = line["box"]
+                self.assertTrue(0 <= x1 < x2 <= r["stats"]["width"], f"box x invalid: {line['box']}")
+                self.assertTrue(0 <= y1 < y2 <= r["stats"]["height"], f"box y invalid: {line['box']}")
 
     def test_blank_image(self):
         with tempfile.TemporaryDirectory() as td:

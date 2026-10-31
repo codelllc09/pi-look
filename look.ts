@@ -83,7 +83,7 @@ function runPython(script: string, args: string[]): Promise<string> {
 
 interface Analysis {
 	stats?: { width: number; height: number; theme: string; dominantColors: { hex: string; share: number }[]; estimatedTextRows: number };
-	ocr?: { available: boolean; error?: string; lines: { conf: number; text: string }[]; avgConf: number | null; text: string; tofuCount: number };
+	ocr?: { available: boolean; error?: string; lines: { conf: number; text: string; box?: number[] }[]; avgConf: number | null; text: string; tofuCount: number };
 	error?: string;
 }
 
@@ -149,7 +149,10 @@ function fmtAnalysis(a: Analysis): string {
 	if (!o.available) parts.push(`[ocr] unavailable: ${o.error}`);
 	else {
 		parts.push(`[ocr] ${o.lines.length} lines, avgConf=${o.avgConf ?? "n/a"}${o.tofuCount ? `, tofuMarkers=${o.tofuCount}` : ""}`);
-		parts.push(o.text || "(no text recognized)");
+		for (const l of o.lines) {
+			const at = l.box ? `[@${l.box[0]},${l.box[1]}→${l.box[2]},${l.box[3]}]` : "";
+			parts.push(`${at} ${l.text}`);
+		}
 	}
 	return parts.join("\n");
 }

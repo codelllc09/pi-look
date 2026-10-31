@@ -92,10 +92,13 @@ def lane1(path: str) -> dict:
         try:
             text = str(item[1])
             conf = float(item[2])
+            pts = [(float(p[0]), float(p[1])) for p in item[0]]
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            box = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
         except Exception:
             continue
         tofu += sum(1 for c in text if _is_tofu(c))
-        lines.append({"conf": round(conf, 3), "text": text})
+        lines.append({"conf": round(conf, 3), "text": text, "box": box})
     avg = round(sum(l["conf"] for l in lines) / len(lines), 3) if lines else None
     joined = "\n".join(l["text"] for l in lines)
     return {"available": True, "lines": lines, "avgConf": avg, "text": joined, "tofuCount": tofu}
