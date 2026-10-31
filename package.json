@@ -1,0 +1,33 @@
+{
+	"name": "pi-look",
+	"version": "0.1.0",
+	"description": "One look() tool, three lanes (pixel stats / local OCR / grounded VLM); the calling model is the router",
+	"license": "MIT",
+	"keywords": [
+		"pi",
+		"pi-extension",
+		"vision",
+		"ocr",
+		"vlm",
+		"text-only-models"
+	],
+	"pi": {
+		"extensions": [
+			"./look.ts"
+		]
+	},
+	"scripts": {
+		"test": "python3 tests/test-analyze.py && node tests/test-router.mjs",
+		"check": "npx esbuild look.ts --outfile=/dev/null"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"devDependencies": {
+		"esbuild": "*",
+		"typebox": "*"
+	},
+	"engines": {
+		"node": ">=22"
+	}
+}
