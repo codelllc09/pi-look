@@ -31,6 +31,8 @@ interface LookConfig {
 	visionModel: string; // "provider/model-id"
 	pythonPath: string;
 	minAutoConf: number;
+	vlmMaxTokens?: number; // default 8192; reasoning judges burn hidden tokens first
+	vlmThinking?: boolean; // default true; false sends thinking:disabled (faster, shallower)
 }
 
 const DEFAULTS: LookConfig = {
@@ -105,28 +107,38 @@ async function callVLM(cfg: LookConfig, question: string, imgPath: string, groun
 	const endpoint = ENDPOINTS[provider];
 	if (!endpoint) throw new Error(`no endpoint mapped for provider "${provider}" — add it in pi-look config or ENDPOINTS`);
 	const b64 = fs.readFileSync(imgPath).toString("base64");
-	const body = {
+	const askOnce = async (maxTokens: number) => {
+		const body: Record<string, unknown> = {
 		model,
-		max_tokens: 1800,
-		messages: [{
-			role: "user",
-			content: [
-				{ type: "text", text: question + `\n\n[protocol] Separate what is VISIBLE in the image from what you INFER. Mark inferences that lack in-image evidence as "(uncertain)" instead of asserting them.` + (grounding ? `\n\n[grounding] Local OCR and pixel stats (may be partial or wrong; trust the image when they conflict):\n${grounding}` : "") },
-				{ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } },
-			],
-		}],
+		max_tokens: maxTokens,
+			messages: [{
+				role: "user",
+				content: [
+					{ type: "text", text: question + `\n\n[protocol] Separate what is VISIBLE in the image from what you INFER. Mark inferences that lack in-image evidence as "(uncertain)" instead of asserting them.` + (grounding ? `\n\n[grounding] Local OCR and pixel stats (may be partial or wrong; trust the image when they conflict):\n${grounding}` : "") },
+					{ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } },
+				],
+			}],
+		};
+		if (cfg.vlmThinking === false) body.thinking = { type: "disabled" };
+		const res = await fetch(endpoint, {
+			method: "POST",
+			headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey(provider)}` },
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(180_000),
+		});
+		if (!res.ok) throw new Error(`VLM ${provider}/${model} HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+		const out = (await res.json()) as { choices?: { message?: { content?: unknown; finish_reason?: string }[] } };
+		let content = out.choices?.[0]?.message?.content ?? "";
+		if (Array.isArray(content)) content = content.map((c: { text?: string }) => c?.text ?? "").join("");
+		return { text: String(content).trim(), finish: out.choices?.[0]?.finish_reason };
 	};
-	const res = await fetch(endpoint, {
-		method: "POST",
-		headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey(provider)}` },
-		body: JSON.stringify(body),
-		signal: AbortSignal.timeout(120_000),
-	});
-	if (!res.ok) throw new Error(`VLM ${provider}/${model} HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
-	const out = (await res.json()) as { choices?: { message?: { content?: unknown } }[] };
-	let content = out.choices?.[0]?.message?.content ?? "";
-	if (Array.isArray(content)) content = content.map((c: { text?: string }) => c?.text ?? "").join("");
-	return String(content).trim();
+	// Reasoning judges can burn the whole budget on hidden thinking: empty body +
+	// finish=length means the ANSWER never got tokens — retry once with double.
+	let budget = cfg.vlmMaxTokens ?? 8192;
+	let r = await askOnce(budget);
+	if (!r.text && r.finish === "length") r = await askOnce((budget *= 2));
+	if (!r.text) throw new Error(`VLM ${provider}/${model} returned empty content (finish=${r.finish})`);
+	return r.text;
 }
 
 function fmtAnalysis(a: Analysis): string {
