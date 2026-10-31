@@ -44,10 +44,12 @@ logged. Endpoints are OpenAI-compatible; add providers in `ENDPOINTS`.
 
 ## Install
 
-RapidOCR runs from the central venv:
+Analyzer deps (Pillow = pixel stats lane, RapidOCR = OCR lane; heavier CV —
+opencv, detectors — is deliberately NOT a dependency, it stays in the model's
+bash domain). Pinned in `scripts/requirements.txt` for fixture comparability:
 
 ```bash
-uv pip install -p ~/.virtualenvs/main/bin/python rapidocr-onnxruntime
+uv pip install -p ~/.virtualenvs/main/bin/python -r scripts/requirements.txt
 pi install ~/Work/pi-look
 ```
 
