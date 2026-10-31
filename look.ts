@@ -111,7 +111,7 @@ async function callVLM(cfg: LookConfig, question: string, imgPath: string, groun
 		messages: [{
 			role: "user",
 			content: [
-				{ type: "text", text: question + (grounding ? `\n\n[grounding] Local OCR and pixel stats (may be partial or wrong; trust the image when they conflict):\n${grounding}` : "") },
+				{ type: "text", text: question + `\n\n[protocol] Separate what is VISIBLE in the image from what you INFER. Mark inferences that lack in-image evidence as "(uncertain)" instead of asserting them.` + (grounding ? `\n\n[grounding] Local OCR and pixel stats (may be partial or wrong; trust the image when they conflict):\n${grounding}` : "") },
 				{ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } },
 			],
 		}],
