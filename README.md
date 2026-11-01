@@ -34,11 +34,14 @@ questions, with local-first lanes and a vision-model lane only when needed:
 ```json
 {
   "visionModel": "zai-coding-cn/glm-5.3-flash",
-  "pythonPath": "~/.virtualenvs/main/bin/python",
   "minAutoConf": 0.3,
   "vlmEndpoints": { "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" }
 }
 ```
+
+`pythonPath` (optional) pins an explicit analyzer interpreter. Default:
+auto-resolve — central uv venv (`~/.virtualenvs/main/bin/python`) if
+present, else `python3` (Windows users should set it).
 
 The API key is read from `<agent-dir>/auth.json[provider].key` and never
 logged. Endpoints are OpenAI-compatible; add providers in `ENDPOINTS`.

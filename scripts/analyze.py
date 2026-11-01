@@ -14,7 +14,16 @@ import json
 import sys
 import unicodedata
 
-from PIL import Image
+try:
+    from PIL import Image
+except ImportError:
+    print(
+        "pi-look analyzer deps missing. Install for this interpreter, e.g.:\n"
+        "  uv pip install pillow rapidocr-onnxruntime\n"
+        "  pip install pillow rapidocr-onnxruntime",
+        file=sys.stderr,
+    )
+    sys.exit(3)
 
 
 def lane0(img: Image.Image) -> dict:

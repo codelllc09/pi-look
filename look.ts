@@ -15,7 +15,7 @@
  *
  * Config: <agent-dir>/pi-look.json
  *   { "visionModel": "zai-coding-cn/glm-5.3-flash",   // provider/id, user-set
- *     "pythonPath":  "~/.virtualenvs/main/bin/python",
+ *     "pythonPath": "python3",                        // optional, auto-resolved
  *     "minAutoConf": 0.3 }
  * API key is read from <agent-dir>/auth.json[provider].key; no key is ever
  * written or logged. Endpoint map is in ENDPOINTS below.
@@ -29,7 +29,7 @@ import { Type } from "typebox";
 
 interface LookConfig {
 	visionModel: string; // "provider/model-id"
-	pythonPath: string;
+	pythonPath?: string; // explicit interpreter; auto-resolved otherwise
 	minAutoConf: number;
 	vlmMaxTokens?: number; // default 8192; reasoning judges burn hidden tokens first
 	vlmThinking?: boolean; // default true; false sends thinking:disabled (faster, shallower)
@@ -38,7 +38,6 @@ interface LookConfig {
 
 const DEFAULTS: LookConfig = {
 	visionModel: "zai-coding-cn/glm-5.3-flash",
-	pythonPath: "~/.virtualenvs/main/bin/python",
 	minAutoConf: 0.3,
 };
 
@@ -88,9 +87,20 @@ interface Analysis {
 	error?: string;
 }
 
+/** Analyzer interpreter: explicit config → central uv venv if present → python3. */
+let pyCache: string | undefined;
+function resolvePython(cfg: LookConfig): string {
+	if (cfg.pythonPath) return expand(cfg.pythonPath);
+	if (pyCache === undefined) {
+		const venv = path.join(os.homedir(), ".virtualenvs", "main", "bin", "python");
+		pyCache = fs.existsSync(venv) ? venv : "python3";
+	}
+	return pyCache;
+}
+
 async function analyze(cfg: LookConfig, imgPath: string): Promise<Analysis> {
 	const script = path.join(import.meta.dirname, "scripts", "analyze.py");
-	const out = await runPython(cfg.pythonPath, [script, imgPath]);
+	const out = await runPython(resolvePython(cfg), [script, imgPath]);
 	return JSON.parse(out) as Analysis;
 }
 

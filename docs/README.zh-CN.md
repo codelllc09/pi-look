@@ -33,11 +33,14 @@
 ```json
 {
   "visionModel": "zai-coding-cn/glm-5.3-flash",
-  "pythonPath": "~/.virtualenvs/main/bin/python",
   "minAutoConf": 0.3,
   "vlmEndpoints": { "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" }
 }
 ```
+
+`pythonPath`（可选）钉死分析器解释器。默认自动解析：中央 uv venv
+（`~/.virtualenvs/main/bin/python`）存在则用之，否则 `python3`
+（Windows 用户建议显式设置）。
 
 API 密钥读自 `<agent-dir>/auth.json[provider].key`，永不落日志。
 端点为 OpenAI 兼容格式；在 `vlmEndpoints` 里加 provider 即可，无需改代码。
