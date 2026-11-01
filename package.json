@@ -1,6 +1,6 @@
 {
 	"name": "pi-look",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "One look() tool, three lanes (pixel stats / local OCR / grounded VLM); the calling model is the router",
 	"license": "MIT",
 	"author": "codelllc09",
