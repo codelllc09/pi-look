@@ -13,7 +13,23 @@ from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
-CJK = "subprocess.check_output(["fc-match","-f","%{file}","Noto Sans Mono CJK SC"]).decode().strip()"
+
+
+def find_cjk_font() -> str | None:
+    """Resolve a Noto CJK font via fontconfig at runtime — no hardcoded paths.
+    PIL's default bitmap font cannot draw CJK, so without a font we skip those
+    assertions instead of fabricating tofu."""
+    try:
+        out = subprocess.run(["fc-match", "-f", "%{file}", "Noto Sans Mono CJK SC"], capture_output=True, text=True, timeout=10)
+        p = out.stdout.strip()
+        if out.returncode == 0 and p and Path(p).exists():
+            return p
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+CJK = find_cjk_font()
 
 
 def analyze(path: str) -> dict:
@@ -23,6 +39,7 @@ def analyze(path: str) -> dict:
 
 
 def make_text_image(path: str, lines: list[str]) -> None:
+    assert CJK, "no CJK font (fc-match Noto Sans Mono CJK SC) — caller must skip"
     img = Image.new("RGB", (800, 60 + 70 * len(lines)), (18, 18, 22))
     d = ImageDraw.Draw(img)
     f = ImageFont.truetype(CJK, 22)
@@ -33,6 +50,8 @@ def make_text_image(path: str, lines: list[str]) -> None:
 
 class AnalyzerTests(unittest.TestCase):
     def test_text_image(self):
+        if not CJK:
+            self.skipTest("no CJK font found; install noto-sans-mono-cjk-vf-fonts (or any fontconfig CJK font)")
         with tempfile.TemporaryDirectory() as td:
             p = f"{td}/t.png"
             make_text_image(p, ["pi-look unit 42", "中文行识别测试"])
@@ -60,9 +79,11 @@ class AnalyzerTests(unittest.TestCase):
             self.assertEqual(r["ocr"]["tofuCount"], 0)
 
     def test_missing_image(self):
-        out = subprocess.run([PY, str(ROOT / "scripts" / "analyze.py"), "./missing.png"], capture_output=True, text=True)
-        self.assertEqual(out.returncode, 3)
-        self.assertIn("error", out.stdout)
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "missing.png"
+            out = subprocess.run([PY, str(ROOT / "scripts" / "analyze.py"), str(missing)], capture_output=True, text=True)
+            self.assertEqual(out.returncode, 3)
+            self.assertIn("error", out.stdout)
 
 
 if __name__ == "__main__":
