@@ -19,5 +19,9 @@ jobs:
         with:
           node-version: 24 # trusted publishing needs npm>=11.5.1 / node>=22.14
           registry-url: https://registry.npmjs.org
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --disable-pip-version-check pillow
       - run: npm ci
       - run: npm publish --access public
