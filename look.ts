@@ -128,7 +128,7 @@ async function callVLM(cfg: LookConfig, question: string, imgPath: string, groun
 			signal: AbortSignal.timeout(180_000),
 		});
 		if (!res.ok) throw new Error(`VLM ${provider}/${model} HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
-		const out = (await res.json()) as { choices?: { message?: { content?: unknown; finish_reason?: string }[] } };
+		const out = (await res.json()) as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }> };
 		let content = out.choices?.[0]?.message?.content ?? "";
 		if (Array.isArray(content)) content = content.map((c: { text?: string }) => c?.text ?? "").join("");
 		return { text: String(content).trim(), finish: out.choices?.[0]?.finish_reason };
@@ -166,6 +166,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "look",
+		label: "look",
 		description:
 			"Look at an image file through a three-lane pipeline. Useful even if you can already see images: the stats/OCR lanes give EXACT numbers your eyes estimate poorly (dimensions, colors, verbatim text, counts). Default (no mode): pixel stats + local OCR — cheap and local; check whether that answers your question before going further. mode='vlm' with a question: asks a vision model grounded with the local OCR — use for semantics ('what is this', shapes, UIs, likeness), when you cannot see images, or as a second opinion. mode='stats'/'ocr': force one lane. Heavier classical CV (contours, template matching, color segmentation, connected components, etc.) you can always write yourself in bash+python.",
 		parameters: Type.Object({
@@ -173,28 +174,29 @@ export default function (pi: ExtensionAPI) {
 			mode: Type.Optional(Type.String({ description: "Lane selection: auto (default) | stats | ocr | vlm" })),
 			question: Type.Optional(Type.String({ description: "For mode=vlm: what to answer about the image" })),
 		}),
-		async execute(_toolCallId: string, args: { path?: string; mode?: string; question?: string } = {}) {
-			const img = expand(String(args?.path ?? ""));
-			if (!args?.path || !fs.existsSync(img)) return { content: [{ type: "text", text: `file not found: ${args?.path}` }], isError: true };
+		async execute(_toolCallId: string, args) {
+			if (!args?.path) return { content: [{ type: "text", text: `path required` }], isError: true, details: {} };
+			const img = expand(String(args.path));
+			if (!fs.existsSync(img)) return { content: [{ type: "text", text: `file not found: ${args.path}` }], isError: true, details: {} };
 			const mode = ["auto", "stats", "ocr", "vlm"].includes(String(args.mode)) ? String(args.mode) : "auto";
 			try {
 				if (mode === "vlm") {
 					const a = await analyze(cfg, img);
 					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely.", img, fmtAnalysis(a));
-					return { content: [{ type: "text", text: answer + `\n\n[grounding used]\n${fmtAnalysis(a).slice(0, 600)}` }] };
+					return { content: [{ type: "text", text: answer + `\n\n[grounding used]\n${fmtAnalysis(a).slice(0, 600)}` }] , details: {} };
 				}
 				const a = await analyze(cfg, img);
 				if (mode === "auto" && shouldAutoEscalate(a.ocr ?? { lines: [], avgConf: null }, cfg.minAutoConf)) {
 					if (visionCapable()) {
 						// Never spend a VLM call on a model with its own eyes (explicit mode=vlm still allowed).
-						return { content: [{ type: "text", text: fmtAnalysis(a) + `\n\n[hint] OCR found little; you have vision — inspect the image yourself, or call look(path, mode="vlm", question="...") for a second opinion.` }] };
+						return { content: [{ type: "text", text: fmtAnalysis(a) + `\n\n[hint] OCR found little; you have vision — inspect the image yourself, or call look(path, mode="vlm", question="...") for a second opinion.` }], details: {} };
 					}
 					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely; OCR found little or no text.", img, fmtAnalysis(a));
-					return { content: [{ type: "text", text: `[auto→vlm: ocr empty/low-conf]\n${answer}\n\n[grounding used]\n${fmtAnalysis(a).slice(0, 600)}` }] };
+					return { content: [{ type: "text", text: `[auto→vlm: ocr empty/low-conf]\n${answer}\n\n[grounding used]\n${fmtAnalysis(a).slice(0, 600)}` }], details: {} };
 				}
-				return { content: [{ type: "text", text: fmtAnalysis(a) + `\n\n[hint] semantics needed? call look(path, mode="vlm", question="...")` }] };
+				return { content: [{ type: "text", text: fmtAnalysis(a) + `\n\n[hint] semantics needed? call look(path, mode="vlm", question="...")` }], details: {} };
 			} catch (e) {
-				return { content: [{ type: "text", text: `look failed: ${String(e instanceof Error ? e.message : e)}` }], isError: true };
+				return { content: [{ type: "text", text: `look failed: ${String(e instanceof Error ? e.message : e)}` }], isError: true, details: {} };
 			}
 		},
 	});

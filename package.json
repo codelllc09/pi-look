@@ -3,29 +3,49 @@
 	"version": "0.1.0",
 	"description": "One look() tool, three lanes (pixel stats / local OCR / grounded VLM); the calling model is the router",
 	"license": "MIT",
+	"author": "codelllc09",
 	"keywords": [
 		"pi",
+		"pi-package",
 		"pi-extension",
 		"vision",
 		"ocr",
 		"vlm",
 		"text-only-models"
 	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/codelllc09/pi-look.git"
+	},
+	"homepage": "https://github.com/codelllc09/pi-look#readme",
+	"bugs": "https://github.com/codelllc09/pi-look/issues",
 	"pi": {
 		"extensions": [
 			"./look.ts"
 		]
 	},
+	"files": [
+		"look.ts",
+		"scripts/analyze.py",
+		"scripts/requirements.txt",
+		"README.md",
+		"docs/",
+		"LICENSE"
+	],
 	"scripts": {
-		"test": "python3 tests/test-analyze.py && node tests/test-router.mjs",
-		"check": "npx esbuild look.ts --outfile=/dev/null"
+		"typecheck": "tsc --noEmit",
+		"test": "p=\"$PI_LOOK_PY\"; [ -x \"$p\" ] || p=\"$HOME/.virtualenvs/main/bin/python\"; [ -x \"$p\" ] || p=python3; \"$p\" tests/test-analyze.py && node tests/test-router.mjs",
+		"check": "npm run typecheck",
+		"prepublishOnly": "npm run typecheck && npm test"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*"
 	},
 	"devDependencies": {
+		"@types/node": "^26.6.6",
 		"esbuild": "*",
-		"typebox": "*"
+		"typebox": "*",
+		"typescript": "^5.9.0"
 	},
 	"engines": {
 		"node": ">=22"

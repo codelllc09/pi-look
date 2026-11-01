@@ -1,6 +1,6 @@
 # pi-look
 
-**English** · [简体中文](#中文)
+**English** · [简体中文](./docs/README.zh-CN.md)
 
 One `look` tool, three lanes; **the calling model is the router**.
 
@@ -50,31 +50,21 @@ opencv etc. — is deliberately NOT a dependency, it stays in the model's
 bash domain). Pinned in `scripts/requirements.txt` for fixture comparability:
 
 ```bash
-uv pip install -p ~/.virtualenvs/main/bin/python -r scripts/requirements.txt
-pi install ~/Work/pi-look
+uv pip install -r scripts/requirements.txt   # or your usual pip/venv
+pi install npm:pi-look
 ```
 
 ## Dev
 
 ```bash
-npx esbuild look.ts --outfile=/dev/null   # syntax gate
-~/.virtualenvs/main/bin/python tests/test-analyze.py
-node tests/test-router.mjs
+npm run typecheck   # tsc --noEmit
+npm test            # analyzer (python) + router (node) tests
 ```
 
----
+The analyzer test picks its interpreter in order: `$PI_LOOK_PY` →
+`~/.virtualenvs/main/bin/python` → `python3`. It needs Pillow + RapidOCR
+installed for that interpreter (`scripts/requirements.txt`).
 
-# 中文
+## License
 
-一个 `look` 工具、三条车道，**路由器就是调用它的主模型**。
-
-- 默认调用返回 Lane 0+1（像素统计 + 本地 OCR，秒级、免费）附提示行；
-  主模型看 OCR 结果自己决定够不够，不够再 `mode="vlm"` 走视觉模型
-  （携带本地 OCR 作锚定，降低幻觉）。
-- 自动升级只看**客观信号**（无文本/低置信度），且主模型自身有视觉时
-  永不代调 VLM（可显式要求第二意见）。
-- 有视觉的模型也欢迎用 stats/ocr 车道：眼睛估不准的精确数字
-  （逐字文本、计数、颜色）由本地测量给出。
-- 更重的 CV（轮廓、模板匹配、检测器）留在模型的 bash+python 域内。
-
-配置见 `<agent-dir>/pi-look.json`；密钥读 `auth.json`，不落日志。
+MIT
