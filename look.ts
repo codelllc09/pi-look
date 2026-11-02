@@ -19,6 +19,15 @@
  *     "minAutoConf": 0.3 }
  * API key is read from <agent-dir>/auth.json[provider].key; no key is ever
  * written or logged. Endpoint map is in ENDPOINTS below.
+ *
+ * Whitebox VLM calls (pi-hear convention): execute() takes the host's
+ * (signal, onUpdate). With onUpdate the VLM request streams (SSE) — deltas
+ * forward to the host throttled (content-driven ≥2s, heartbeat ≥5s for
+ * reasoning models that emit nothing while thinking) and to a pi-taskwatcher
+ * footer chip (~/.pi/agent/status/look-<id>.json); without it the request is
+ * non-streaming, identical to the legacy behavior. abort kills the fetch
+ * (host signal ∧ 180s timeout). A stream that yields no text falls back to
+ * one non-streaming retry.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -111,17 +120,97 @@ function apiKey(provider: string): string {
 	return key;
 }
 
-async function callVLM(cfg: LookConfig, question: string, imgPath: string, grounding: string): Promise<string> {
+/** Host progress callback — may be missing (old hosts / nested calls). */
+type OnUpdate = (partial: { content: { type: "text"; text: string }[]; details: undefined }) => void;
+
+interface VlmOpts {
+	signal?: AbortSignal; // host abort → abort the fetch
+	onUpdate?: OnUpdate; // present → stream + progress forwarding
+	taskId?: string; // pi-taskwatcher status id; undefined → no status file
+	owner?: string; // owning conversation id
+}
+
+// pi-taskwatcher status file (~/.pi/agent/status/<id>.json, atomic tmp+rename):
+// shows a live footer chip while long VLM calls run. Best-effort only.
+const STATUS_DIR = process.env.PI_TASK_STATUS_DIR ?? path.join(os.homedir(), ".pi", "agent", "status");
+
+function writeStatus(id: string, done: number, total: number, note: string, owner?: string): void {
+	try {
+		fs.mkdirSync(STATUS_DIR, { recursive: true });
+		const p = path.join(STATUS_DIR, `${id}.json`);
+		fs.writeFileSync(`${p}.tmp`, JSON.stringify({ id, label: "look", done, total, note, ...(owner ? { owner } : {}), updated: Math.floor(Date.now() / 1000) }));
+		fs.renameSync(`${p}.tmp`, p);
+	} catch { /* footer chip is optional — never fail the run */ }
+}
+
+function removeStatus(id: string): void {
+	try { fs.rmSync(path.join(STATUS_DIR, `${id}.json`), { force: true }); } catch { /* best-effort */ }
+}
+
+/** Consume an OpenAI-compatible SSE body: accumulate deltas, throttled progress. Exported for tests. */
+export async function readSSE(res: Response, model: string, opts: VlmOpts, t0: number): Promise<{ text: string; finish: string | undefined }> {
+	let text = "", finish: string | undefined;
+	let lastPush = 0, pushedLen = 0;
+	const push = () => {
+		lastPush = Date.now();
+		const secs = Math.round((Date.now() - t0) / 1000);
+		const note = text ? `vlm streaming ${text.length} chars · ${secs}s` : `vlm waiting for first token · ${secs}s`;
+		try {
+			opts.onUpdate?.({ content: [{ type: "text", text: `look: ${note} …` }], details: undefined });
+			if (opts.taskId) writeStatus(opts.taskId, 0, 0, `${note} · ${model}`, opts.owner);
+		} catch { /* progress must never fail the run */ }
+	};
+	// heartbeat: reasoning judges can think for tens of seconds emitting nothing
+	const heart = setInterval(() => { if (Date.now() - lastPush >= 5000) push(); }, 5000);
+	heart.unref?.();
+	const reader = res.body!.getReader();
+	const dec = new TextDecoder();
+	let buf = "";
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			buf += dec.decode(value, { stream: true });
+			let sep: number;
+			while ((sep = buf.indexOf("\n\n")) >= 0) {
+				const frame = buf.slice(0, sep);
+				buf = buf.slice(sep + 2);
+				for (const raw of frame.split("\n")) {
+					const line = raw.replace(/\r$/, "");
+					if (!line.startsWith("data:")) continue;
+					const payload = line.slice(5).trimStart();
+					if (!payload || payload === "[DONE]") continue;
+					let j: { choices?: Array<{ delta?: { content?: unknown }; finish_reason?: string }> };
+					try { j = JSON.parse(payload); } catch { continue; /* skip malformed frame */ }
+					const c0 = j.choices?.[0];
+					let d = c0?.delta?.content ?? "";
+					if (Array.isArray(d)) d = d.map((c: unknown) => (typeof c === "string" ? c : (c as { text?: string })?.text ?? "")).join("");
+					if (d) text += String(d);
+					if (c0?.finish_reason) finish = c0.finish_reason;
+				}
+			}
+			// first token arriving is itself news (long thinking just ended);
+			// afterwards content-driven ≥64 chars/≥2s, heartbeat ≥5s
+			if ((pushedLen === 0 && text) || (text.length - pushedLen >= 64 && Date.now() - lastPush >= 2000)) { pushedLen = text.length; push(); }
+		}
+	} finally {
+		clearInterval(heart);
+	}
+	return { text: text.trim(), finish };
+}
+
+export async function callVLM(cfg: LookConfig, question: string, imgPath: string, grounding: string, opts: VlmOpts = {}): Promise<string> {
 	const slash = cfg.visionModel.indexOf("/");
 	const provider = cfg.visionModel.slice(0, slash);
 	const model = cfg.visionModel.slice(slash + 1);
 	const endpoint = cfg.vlmEndpoints?.[provider] ?? ENDPOINTS[provider];
 	if (!endpoint) throw new Error(`no endpoint for provider "${provider}" — set vlmEndpoints["${provider}"] in pi-look.json`);
 	const b64 = fs.readFileSync(imgPath).toString("base64");
-	const askOnce = async (maxTokens: number) => {
+	const askOnce = async (maxTokens: number, stream: boolean) => {
 		const body: Record<string, unknown> = {
 		model,
 		max_tokens: maxTokens,
+		stream,
 			messages: [{
 				role: "user",
 				content: [
@@ -131,23 +220,34 @@ async function callVLM(cfg: LookConfig, question: string, imgPath: string, groun
 			}],
 		};
 		if (cfg.vlmThinking === false) body.thinking = { type: "disabled" };
+		const timeout = AbortSignal.timeout(180_000);
 		const res = await fetch(endpoint, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey(provider)}` },
 			body: JSON.stringify(body),
-			signal: AbortSignal.timeout(180_000),
+			signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
 		});
 		if (!res.ok) throw new Error(`VLM ${provider}/${model} HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
-		const out = (await res.json()) as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }> };
-		let content = out.choices?.[0]?.message?.content ?? "";
-		if (Array.isArray(content)) content = content.map((c: { text?: string }) => c?.text ?? "").join("");
-		return { text: String(content).trim(), finish: out.choices?.[0]?.finish_reason };
+		if (!stream || !res.body) {
+			const out = (await res.json()) as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }> };
+			let content = out.choices?.[0]?.message?.content ?? "";
+			if (Array.isArray(content)) content = content.map((c: { text?: string }) => c?.text ?? "").join("");
+			return { text: String(content).trim(), finish: out.choices?.[0]?.finish_reason };
+		}
+		return readSSE(res, cfg.visionModel, opts, Date.now());
 	};
 	// Reasoning judges can burn the whole budget on hidden thinking: empty body +
 	// finish=length means the ANSWER never got tokens — retry once with double.
+	if (opts.onUpdate) {
+		try { opts.onUpdate({ content: [{ type: "text", text: `look: asking ${cfg.visionModel} …` }], details: undefined }); } catch { /* never fail the run */ }
+		if (opts.taskId) writeStatus(opts.taskId, 0, 0, `vlm asking · ${cfg.visionModel}`, opts.owner);
+	}
 	let budget = cfg.vlmMaxTokens ?? 8192;
-	let r = await askOnce(budget);
-	if (!r.text && r.finish === "length") r = await askOnce((budget *= 2));
+	let r = await askOnce(budget, !!opts.onUpdate);
+	if (!r.text && r.finish === "length") r = await askOnce((budget *= 2), !!opts.onUpdate);
+	// A stream that yielded nothing (endpoint without SSE support?) → one
+	// legacy non-streaming attempt before giving up.
+	if (!r.text && !r.finish) r = await askOnce(budget, false);
 	if (!r.text) throw new Error(`VLM ${provider}/${model} returned empty content (finish=${r.finish})`);
 	return r.text;
 }
@@ -184,29 +284,39 @@ export default function (pi: ExtensionAPI) {
 			mode: Type.Optional(Type.String({ description: "Lane selection: auto (default) | stats | ocr | vlm" })),
 			question: Type.Optional(Type.String({ description: "For mode=vlm: what to answer about the image" })),
 		}),
-		async execute(_toolCallId: string, args) {
-			if (!args?.path) return { content: [{ type: "text", text: `path required` }], isError: true, details: {} };
+		async execute(toolCallId: string, args, signal?: AbortSignal, onUpdate?: OnUpdate, ctx?: { sessionManager?: { getSessionId?: () => string } }) {
+			if (!args?.path) return { content: [{ type: "text", text: `path required` }], isError: true, details: undefined };
 			const img = expand(String(args.path));
-			if (!fs.existsSync(img)) return { content: [{ type: "text", text: `file not found: ${args.path}` }], isError: true, details: {} };
+			if (!fs.existsSync(img)) return { content: [{ type: "text", text: `file not found: ${args.path}` }], isError: true, details: undefined };
 			const mode = ["auto", "stats", "ocr", "vlm"].includes(String(args.mode)) ? String(args.mode) : "auto";
+			// footer progress chip (pi-taskwatcher convention) — only when a host
+			// actually watches progress; short ids keep the filename sane
+			const short = (toolCallId ?? "").replace(/[^A-Za-z0-9._-]/g, "").slice(-8) || Math.random().toString(36).slice(2, 8);
+			const taskId = onUpdate && mode !== "stats" && mode !== "ocr" ? `look-${short}` : undefined;
+			const vopts: VlmOpts = { signal, onUpdate, taskId, owner: ctx?.sessionManager?.getSessionId?.() };
 			try {
 				if (mode === "vlm") {
 					const a = await analyze(cfg, img);
-					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely.", img, fmtAnalysis(a));
-					return { content: [{ type: "text", text: answer + `\n\n[grounding used]\n${fmtAnalysis(a).slice(0, 600)}` }] , details: {} };
+					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely.", img, fmtAnalysis(a), vopts);
+					if (taskId) writeStatus(taskId, 1, 1, `vlm done · ${answer.length} chars`, vopts.owner);
+					return { content: [{ type: "text", text: answer + `\n\n[grounding used]\n${fmtAnalysis(a).slice(0, 600)}` }], details: undefined };
 				}
 				const a = await analyze(cfg, img);
 				if (mode === "auto" && shouldAutoEscalate(a.ocr ?? { lines: [], avgConf: null }, cfg.minAutoConf)) {
 					if (visionCapable()) {
 						// Never spend a VLM call on a model with its own eyes (explicit mode=vlm still allowed).
-						return { content: [{ type: "text", text: fmtAnalysis(a) + `\n\n[hint] OCR found little; you have vision — inspect the image yourself, or call look(path, mode="vlm", question="...") for a second opinion.` }], details: {} };
+						return { content: [{ type: "text", text: fmtAnalysis(a) + `\n\n[hint] OCR found little; you have vision — inspect the image yourself, or call look(path, mode="vlm", question="...") for a second opinion.` }], details: undefined };
 					}
-					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely; OCR found little or no text.", img, fmtAnalysis(a));
-					return { content: [{ type: "text", text: `[auto→vlm: ocr empty/low-conf]\n${answer}\n\n[grounding used]\n${fmtAnalysis(a).slice(0, 600)}` }], details: {} };
+					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely; OCR found little or no text.", img, fmtAnalysis(a), vopts);
+					if (taskId) writeStatus(taskId, 1, 1, `vlm done · ${answer.length} chars`, vopts.owner);
+					return { content: [{ type: "text", text: `[auto→vlm: ocr empty/low-conf]\n${answer}\n\n[grounding used]\n${fmtAnalysis(a).slice(0, 600)}` }], details: undefined };
 				}
-				return { content: [{ type: "text", text: fmtAnalysis(a) + `\n\n[hint] semantics needed? call look(path, mode="vlm", question="...")` }], details: {} };
+				return { content: [{ type: "text", text: fmtAnalysis(a) + `\n\n[hint] semantics needed? call look(path, mode="vlm", question="...")` }], details: undefined };
 			} catch (e) {
-				return { content: [{ type: "text", text: `look failed: ${String(e instanceof Error ? e.message : e)}` }], isError: true, details: {} };
+				if (taskId) removeStatus(taskId);
+				const msg = e instanceof Error ? e.message : String(e);
+				const text = signal?.aborted ? "look: aborted by user" : `look failed: ${msg}`;
+				return { content: [{ type: "text", text }], isError: true, details: undefined };
 			}
 		},
 	});

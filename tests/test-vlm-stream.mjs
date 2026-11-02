@@ -1,0 +1,116 @@
+/** VLM streaming whitebox tests: mock OpenAI-compatible SSE endpoint.
+ * Covers: SSE frame parsing (split frames, CRLF, array/string deltas, [DONE]),
+ * onUpdate forwarding, taskwatcher status file, non-stream fallback, abort. */
+import { execSync } from "node:child_process";
+import assert from "node:assert";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import http from "node:http";
+
+const bundle = join(import.meta.dirname, "..", "look.test.bundle.mjs");
+execSync(`npx esbuild ${join(import.meta.dirname, "..", "look.ts")} --bundle --format=esm --platform=node --external:@earendil-works/pi-coding-agent --external:typebox --outfile=${bundle}`, { stdio: "pipe" });
+
+// isolated agent dir (fake auth.json) + status dir
+const agent = mkdtempSync(join(tmpdir(), "look-vlm-agent-"));
+const statusDir = mkdtempSync(join(tmpdir(), "look-vlm-status-"));
+process.env.PI_CODING_AGENT_DIR = agent;
+process.env.PI_TASK_STATUS_DIR = statusDir;
+writeFileSync(join(agent, "auth.json"), JSON.stringify({ mockprov: { type: "api", key: "sk-test" } }));
+// tiny valid PNG (1x1)
+const png = join(agent, "px.png");
+writeFileSync(png, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mPkz8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==", "base64"));
+
+const { callVLM } = await import(bundle);
+
+let n = 0; // test counter
+const done = (name) => console.log(`ok ${++n} - ${name}`);
+
+// ---- mock server -----------------------------------------------------------
+const frames = (arr) => arr.map((o) => `data: ${JSON.stringify(o)}\n\n`).join("") + "data: [DONE]\n\n";
+let handler = () => {};
+const server = http.createServer((req, res) => handler(req, res));
+await new Promise((r) => server.listen(0, "127.0.0.1", r));
+const base = `http://127.0.0.1:${server.address().port}`;
+const cfg = { visionModel: "mockprov/mock-1", minAutoConf: 0.3, vlmEndpoints: { mockprov: `${base}/v1/chat` } };
+
+const readBody = (req) => new Promise((r) => { let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => r(JSON.parse(b))); });
+const sseHeaders = { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" };
+
+// 1-3: SSE parsing + progress + status file --------------------------------
+{
+	const updates = [];
+	const chunks = [
+		// frame split across TCP writes + CRLF line endings + string delta
+		'data: {"choices":[{"delta":{"content":"Hel',
+		'lo"}}]}\r\n\r\ndata: {"choices":[{"delta":{"content":[" wor","ld"]}}]}\n\n', // array delta (zai style)
+		'data: {"choices":[{"delta":{}},{"delta":{"reasoning_content":"ignore me"},"finish_reason":null}]}\n\n',
+		'data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}\n\n',
+		"data: [DONE]\n\n",
+	];
+	handler = async (req, res) => {
+		const body = await readBody(req);
+		assert.equal(body.stream, true, "stream flag sent");
+		assert.equal(body.model, "mock-1");
+		res.writeHead(200, sseHeaders);
+		for (const c of chunks) { res.write(c); await new Promise((r) => setTimeout(r, 30)); }
+		res.end();
+	};
+	const answer = await callVLM(cfg, "q", png, "", { onUpdate: (u) => updates.push(u.content[0].text), taskId: "look-t1", owner: "sess-1" });
+	assert.equal(answer, "Hello world!"); // split frame + CRLF + array/string deltas + reasoning_content ignored
+	done("SSE parsing: split frames, CRLF, array+string deltas, [DONE]");
+	assert.ok(updates.some((t) => t.includes("asking")), "asking notice pushed");
+	assert.ok(updates.some((t) => t.includes("look:") && t.includes("streaming")), "streaming progress pushed");
+	done("onUpdate: asking + streaming notices forwarded");
+	const st = JSON.parse(readFileSync(join(statusDir, "look-t1.json"), "utf8"));
+	assert.equal(st.label, "look"); assert.equal(st.owner, "sess-1"); assert.ok(st.note.length > 0);
+	done("taskwatcher status file written (label/owner/note)");
+}
+
+// 4: no onUpdate → legacy non-streaming request ---------------------------
+{
+	handler = async (req, res) => {
+		const body = await readBody(req);
+		assert.equal(body.stream, false, "no onUpdate → non-streaming");
+		res.writeHead(200, { "Content-Type": "application/json" });
+		res.end(JSON.stringify({ choices: [{ message: { content: "plain answer" }, finish_reason: "stop" }] }));
+	};
+	const answer = await callVLM(cfg, "q", png, "", {});
+	assert.equal(answer, "plain answer");
+	done("no onUpdate: legacy non-streaming path intact");
+}
+
+// 5: empty stream → non-streaming fallback ---------------------------------
+{
+	let calls = 0;
+	handler = async (req, res) => {
+		calls++;
+		const body = await readBody(req);
+		if (body.stream) { // SSE that yields nothing (endpoint without SSE support)
+			res.writeHead(200, sseHeaders);
+			res.end("data: [DONE]\n\n");
+		} else {
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ choices: [{ message: { content: "fallback ok" }, finish_reason: "stop" }] }));
+		}
+	};
+	const answer = await callVLM(cfg, "q", png, "", { onUpdate: () => {} });
+	assert.equal(answer, "fallback ok");
+	assert.equal(calls, 2, "stream attempt then non-stream retry");
+	done("empty stream falls back to one non-streaming attempt");
+}
+
+// 6: abort kills the fetch ---------------------------------------------------
+{
+	handler = () => { /* hang forever */ };
+	const ac = new AbortController();
+	setTimeout(() => ac.abort(), 300);
+	await assert.rejects(
+		() => callVLM(cfg, "q", png, "", { signal: ac.signal, onUpdate: () => {} }),
+		(e) => /abort/i.test(e.message),
+	);
+	done("host abort rejects the in-flight VLM call");
+}
+
+server.close();
+console.log(`test-vlm-stream: ${n}/${n} passed`);
