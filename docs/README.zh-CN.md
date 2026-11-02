@@ -26,6 +26,20 @@
 - 更重的经典 CV（轮廓、模板匹配、颜色分割、连通域等）刻意留在模型
   自己的 bash+python 域内。
 
+## 长调用的进度反馈（白盒执行）
+
+VLM 调用可能耗时数十秒（推理型判官 thinking 阶段一个字都不出）。
+宿主传了 `onUpdate` 时，`look` 自动改用**流式（SSE）**请求并持续回报：
+
+- 首 token 到达立即推一条，之后内容驱动节流（≥64 字符且 ≥2s）；
+- thinking 期间每 5s 心跳一条（`waiting for first token · Ns`）；
+- 同时写 pi-taskwatcher 状态文件
+  （`~/.pi/agent/status/look-<id>.json`，footer 芯片，尽力而为）；
+- 宿主 abort 信号随时中断 fetch；180s 硬超时不变。
+
+老宿主不传 `onUpdate` 时退回非流式，行为与旧版完全一致；流式端点
+  异常返回空文本时也会自动回退一次非流式请求。
+
 ## 配置
 
 `<agent-dir>/pi-look.json`（全部可选）：
@@ -63,7 +77,7 @@ uv pip install -r scripts/requirements.txt   # 或你习惯的 pip/venv 方式
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # 分析器（python）+ 路由器（node）测试
+npm test            # 分析器（python）+ 路由器 + VLM 流式（mock 端点）测试
 ```
 
 分析器测试按顺序选解释器：`$PI_LOOK_PY` →

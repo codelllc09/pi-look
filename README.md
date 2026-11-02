@@ -27,6 +27,23 @@ questions, with local-first lanes and a vision-model lane only when needed:
 - Heavier classical CV (contours, template matching, color segmentation,
   connected components, etc.) stays in the model's bash+python domain by design.
 
+## Progress feedback for long calls (whitebox VLM)
+
+VLM calls can take tens of seconds (reasoning judges emit nothing while
+thinking). When the host passes `onUpdate`, `look` switches the request to
+**streaming (SSE)** and reports continuously:
+
+- first token pushes immediately, then content-driven throttling
+  (≥64 chars and ≥2s);
+- a ≥5s heartbeat during thinking (`waiting for first token · Ns`);
+- a pi-taskwatcher status file
+  (`~/.pi/agent/status/look-<id>.json`, footer chip, best-effort);
+- host abort interrupts the fetch at any time; the 180s hard timeout stays.
+
+Without `onUpdate` (older hosts) the request is non-streaming, identical to
+legacy behavior; a streaming endpoint that yields no text falls back to one
+non-streaming attempt.
+
 ## Config
 
 `<agent-dir>/pi-look.json` (all optional):
@@ -61,7 +78,7 @@ pi install npm:pi-look
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # analyzer (python) + router (node) tests
+npm test            # analyzer (python) + router + VLM streaming (mock endpoint) tests
 ```
 
 The analyzer test picks its interpreter in order: `$PI_LOOK_PY` →
