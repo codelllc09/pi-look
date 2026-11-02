@@ -34,7 +34,7 @@
 	],
 	"scripts": {
 		"typecheck": "tsc --noEmit",
-		"test": "p=\"$PI_LOOK_PY\"; [ -x \"$p\" ] || p=\"$HOME/.virtualenvs/main/bin/python\"; [ -x \"$p\" ] || p=python3; \"$p\" tests/test-analyze.py && node tests/test-router.mjs",
+		"test": "p=\"$PI_LOOK_PY\"; [ -x \"$p\" ] || p=\"$HOME/.virtualenvs/main/bin/python\"; [ -x \"$p\" ] || p=python3; \"$p\" tests/test-analyze.py && node tests/test-router.mjs && node tests/test-vlm-stream.mjs",
 		"check": "npm run typecheck",
 		"prepublishOnly": "npm run typecheck && npm test"
 	},
