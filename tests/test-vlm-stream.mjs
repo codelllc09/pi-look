@@ -136,7 +136,11 @@ if (first === "--stats-only") {
 `, { mode: 0o700 });
 	writeFileSync(join(agent, "pi-look.json"), JSON.stringify({ ...cfg, pythonPath: analyzer }));
 	let tool;
-	registerLook({ on() {}, registerTool(spec) { tool = spec; } });
+	const hooks = {};
+	registerLook({ on(name, hook) { hooks[name] = hook; }, registerTool(spec) { tool = spec; } });
+	const textModel = { input: ["text"] };
+	const visionModel = { input: ["text", "image"] };
+	await hooks.session_start({}, { model: textModel });
 
 	const stats = await tool.execute("stats", { path: png, mode: "stats" });
 	assert.match(stats.content[0].text, /^\[stats\] 1x1/);
@@ -162,6 +166,29 @@ if (first === "--stats-only") {
 		assert.ok(!result.isError, result.content[0].text);
 	}
 	done("VLM forwards original JPEG bytes or the normalized PNG with grounding");
+
+	let relayCalls = 0;
+	handler = (_req, res) => {
+		relayCalls++;
+		res.writeHead(200, { "Content-Type": "application/json" });
+		res.end(JSON.stringify({ choices: [{ message: { content: "unexpected relay" } }] }));
+	};
+	for (const mode of ["auto", "vlm"]) {
+		// The execution context takes precedence over the session's last selected model.
+		const result = await tool.execute(mode, { path: png, mode }, undefined, undefined, { model: visionModel });
+		assert.ok(!result.isError, result.content[0].text);
+		assert.match(result.content[0].text, /\[ocr\] 0 lines/);
+		assert.match(result.content[0].text, /Inspect the original image directly/);
+		assert.doesNotMatch(result.content[0].text, /call look\(path, mode="vlm"/);
+	}
+	await hooks.model_select({ model: visionModel });
+	const fallback = await tool.execute("legacy", { path: png, mode: "vlm" });
+	assert.match(fallback.content[0].text, /Inspect the original image directly/);
+	await hooks.session_start({}, {});
+	const unknown = await tool.execute("unknown", { path: png, mode: "vlm" });
+	assert.match(unknown.content[0].text, /\[ocr\] 0 lines/);
+	assert.equal(relayCalls, 0);
+	done("vision-capable and unknown callers stay local, including explicit vlm mode");
 
 	const retry = join(agent, "retry.jpg");
 	writeFileSync(retry, jpegBytes);

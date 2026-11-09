@@ -1,18 +1,16 @@
 /**
  * pi-look — one tool, three lanes, the model is the router.
  *
- *   look(path)              → Lane 0+1 (pixel stats + OCR, local, ~2s) plus a
- *                             hint line. The calling model reads the OCR text
- *                             and decides whether that answered its question.
+ *   look(path)              → Lane 0+1 (pixel stats + OCR, local, ~2s).
  *   look(path, mode="vlm",
  *        question="...")    → Lane 2: VLM call with Lane 0+1 output as
- *                             grounding (OCR text anchors the judgment).
+ *                             grounding, available to text-only models.
  *   look(path, mode="stats") → pixel stats only.
  *   look(path, mode="ocr")   → grounded local OCR.
  *
- * auto mode only escalates inline on an OBJECTIVE signal (no text found or
- * avgConf < minAutoConf) — intent classification is deliberately absent: the
- * caller is a language model and routes better than any keyword heuristic.
+ * Vision-capable models inspect the original directly and use local results
+ * as supporting evidence. For text-only models, auto can escalate on empty
+ * OCR or avgConf < minAutoConf.
  *
  * Config: <agent-dir>/pi-look.json
  *   { "visionModel": "zai-coding-cn/glm-5.3-flash",   // provider/id, user-set
@@ -48,7 +46,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 interface LookConfig {
 	visionModel: string; // "provider/model-id"
@@ -77,11 +75,10 @@ const ENDPOINTS: Record<string, string> = {
 const agentDir = () => process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
 const expand = (p: string) => (p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p);
 
-/** Tracked so the auto lane never spends a VLM call on a model with its own eyes. */
-let currentModel: { provider?: string; id?: string; input?: ("text" | "image")[] } | undefined;
 /** The models-store `input` declaration is authoritative — never infer vision from a model name. */
-const modelHasVision = (m: { input?: ("text" | "image")[] } | undefined) => Array.isArray(m?.input) && m.input.includes("image");
-const visionCapable = () => modelHasVision(currentModel);
+const modelHasVision = (m: ExtensionContext["model"]) => Array.isArray(m?.input) && m.input.includes("image");
+const VISION_HINT = "[hint] Inspect the original image directly. Use read if you only have the path, and use these local results to verify details.";
+const RELAY_HINT = '[hint] semantics needed? call look(path, mode="vlm", question="...")';
 
 function loadConfig(): LookConfig {
 	try {
@@ -421,13 +418,14 @@ export function stripOmissionNote(text: string): string {
 
 /** Compose the takeover replacement for a read-image result — same shape as look's default output. */
 export function mergeReadTakeover(readNote: string, analysis: string): string {
-	return [stripOmissionNote(readNote), analysis, `[hint] semantics needed? call look(path, mode="vlm", question="...")`]
+	return [stripOmissionNote(readNote), analysis, RELAY_HINT]
 		.filter(Boolean)
 		.join("\n\n");
 }
 
 export default function (pi: ExtensionAPI) {
 	const cfg = loadConfig();
+	let currentModel: ExtensionContext["model"];
 
 	pi.on("session_start", async (_e, ctx) => { currentModel = ctx.model; });
 	pi.on("model_select", async (e) => { currentModel = e.model; });
@@ -479,26 +477,33 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "look",
 		label: "look",
-		promptSnippet: "Inspect image files — local pixel stats + OCR, VLM relay on demand",
+		promptSnippet: "Measure image pixels and extract text with local OCR",
 		promptGuidelines: [
-			"When the conversation references an image path and you cannot see images natively, call look(path): local pixel stats and verbatim OCR answer most questions. Add mode=\"vlm\" with a question only when visual semantics are needed.",
+			"If you have vision, inspect the original attachment or open the file with read first. Call look only to verify details with local measurements or OCR. Never use the VLM relay.",
+			"If your model is text-only, start with look(path). Use mode=\"vlm\" with a focused question when local results are insufficient.",
 		],
-		description:
-			"Look at an image file through a three-lane pipeline. The local lanes provide dimensions, approximate colors and layout, and OCR text. In [grid], ≡ marks high Sobel edge density. Default (no mode): pixel stats + local OCR — check whether that answers your question before going further. mode='vlm' with a question: asks a vision model grounded with local stats and OCR — use for semantics ('what is this', shapes, UIs, likeness), when you cannot see images, or as a second opinion. mode='stats': pixel stats only. mode='ocr': local OCR with pixel grounding. Heavier classical CV (contours, template matching, color segmentation, connected components, etc.) you can always write yourself in bash+python.",
+		description: [
+			"If you have vision, inspect the original image first. Use the attachment or open the file with read. Call look only when you need to verify a detail. Use mode=\"stats\" for dimensions, approximate colors, and layout, or mode=\"ocr\" to add local text extraction. Never use the VLM relay (mode=\"vlm\").",
+			"If your model is text-only, start with look(path) for local pixel stats and OCR. The default auto mode may relay when OCR returns no text or low-confidence text. Use mode=\"vlm\" with a focused question when local results are insufficient.",
+		].join("\n\n"),
 		parameters: Type.Object({
 			path: Type.String({ description: "Image file path (png/jpg/webp/bmp)" }),
-			mode: Type.Optional(Type.String({ description: "Lane selection: auto (default) | stats | ocr | vlm" })),
-			question: Type.Optional(Type.String({ description: "For mode=vlm: what to answer about the image" })),
+			mode: Type.Optional(Type.String({ description: "auto (default) | stats | ocr | vlm (text-only callers)" })),
+			question: Type.Optional(Type.String({ description: "Question for the VLM relay when applicable" })),
 		}),
-		async execute(toolCallId: string, args, signal?: AbortSignal, onUpdate?: OnUpdate, ctx?: { sessionManager?: { getSessionId?: () => string } }) {
+		async execute(toolCallId: string, args, signal?: AbortSignal, onUpdate?: OnUpdate, ctx?: ExtensionContext) {
 			if (!args?.path) return { content: [{ type: "text", text: `path required` }], isError: true, details: undefined };
 			const img = expand(String(args.path));
 			if (!fs.existsSync(img)) return { content: [{ type: "text", text: `file not found: ${args.path}` }], isError: true, details: undefined };
-			const mode = ["auto", "stats", "ocr", "vlm"].includes(String(args.mode)) ? String(args.mode) : "auto";
+			const model = ctx?.model ?? currentModel;
+			const hasVision = modelHasVision(model);
+			const canRelay = Array.isArray(model?.input) && model.input.includes("text") && !hasVision;
+			const requestedMode = ["auto", "stats", "ocr", "vlm"].includes(String(args.mode)) ? String(args.mode) : "auto";
+			const mode = requestedMode === "vlm" && !canRelay ? "ocr" : requestedMode;
 			// footer progress chip (pi-taskwatcher convention) — only when a host
 			// actually watches progress; short ids keep the filename sane
 			const short = (toolCallId ?? "").replace(/[^A-Za-z0-9._-]/g, "").slice(-8) || Math.random().toString(36).slice(2, 8);
-			const taskId = onUpdate && mode !== "stats" && mode !== "ocr" ? `look-${short}` : undefined;
+			const taskId = onUpdate && canRelay && (mode === "auto" || mode === "vlm") ? `look-${short}` : undefined;
 			const vopts: VlmOpts = { signal, onUpdate, taskId, owner: ctx?.sessionManager?.getSessionId?.() };
 			try {
 				if (mode === "vlm") {
@@ -508,16 +513,14 @@ export default function (pi: ExtensionAPI) {
 					return { content: [{ type: "text", text: answer + `\n\n[grounding used]\n${fmtAnalysis(a, cfg).slice(0, 600)}` }], details: undefined };
 				}
 				const a = mode === "stats" ? await analyze(cfg, img, signal, { statsOnly: true }) : await analyzeWithRetry(cfg, img, signal);
-				if (mode === "auto" && shouldAutoEscalate(a.ocr ?? { lines: [], avgConf: null }, cfg.minAutoConf)) {
-					if (visionCapable()) {
-						// Never spend a VLM call on a model with its own eyes (explicit mode=vlm still allowed).
-						return { content: [{ type: "text", text: fmtAnalysis(a, cfg) + `\n\n[hint] OCR found little; you have vision — inspect the image yourself, or call look(path, mode="vlm", question="...") for a second opinion.` }], details: undefined };
-					}
+				if (mode === "auto" && canRelay && shouldAutoEscalate(a.ocr ?? { lines: [], avgConf: null }, cfg.minAutoConf)) {
 					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely; OCR found little or no text.", img, fmtAnalysis(a, cfg), { ...vopts, image: a.image });
 					if (taskId) writeStatus(taskId, 1, 1, `vlm done · ${answer.length} chars`, vopts.owner);
 					return { content: [{ type: "text", text: `[auto→vlm: ocr empty/low-conf]\n${answer}\n\n[grounding used]\n${fmtAnalysis(a, cfg).slice(0, 600)}` }], details: undefined };
 				}
-				return { content: [{ type: "text", text: fmtAnalysis(a, cfg) + `\n\n[hint] semantics needed? call look(path, mode="vlm", question="...")` }], details: undefined };
+				const hint = hasVision ? VISION_HINT : canRelay ? RELAY_HINT : undefined;
+				const text = [fmtAnalysis(a, cfg), hint].filter(Boolean).join("\n\n");
+				return { content: [{ type: "text", text }], details: undefined };
 			} catch (e) {
 				if (taskId) removeStatus(taskId);
 				const msg = e instanceof Error ? e.message : String(e);

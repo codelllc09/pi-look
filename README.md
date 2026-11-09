@@ -15,13 +15,12 @@ questions, with local-first lanes and a vision-model lane only when needed:
 
 ## Protocol
 
-- `look(path)` — returns Lane 0+1 plus a hint. The caller reads the OCR text
-  and decides: answered → move on; semantics needed → call again with
-  `mode="vlm"`. No intent classification in code — the caller is a language
-  model and routes better than any keyword heuristic.
-- `auto` escalation fires **only** on objective signals (no text found, or
-  `avgConf < minAutoConf`), and **never** spends a VLM call when the active
-  model has its own vision (`mode="vlm"` remains available as second opinion).
+- Vision-capable models inspect the original attachment or open the file
+  with `read` first. Use Lane 0+1 when measurements or OCR help verify a
+  detail. A request for `mode="vlm"` runs local analysis.
+- For text-only models, `look(path)` starts with Lane 0+1. Its default
+  `auto` mode can relay when OCR finds no text or `avgConf < minAutoConf`.
+  Use `mode="vlm"` with a question when local results are insufficient.
 - `mode="stats"` runs pixel analysis only. `mode="ocr"` returns local OCR
   with pixel grounding.
 - Stats and OCR use EXIF-corrected coordinates and composite transparency
