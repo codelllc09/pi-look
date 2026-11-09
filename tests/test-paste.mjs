@@ -6,11 +6,11 @@ import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { getOsc8LinkAtColumn, setCapabilities, stripTerminalSequences } from "@earendil-works/pi-tui";
+import { getOsc8LinkAtColumn, setCapabilities, setCellDimensions, stripTerminalSequences } from "@earendil-works/pi-tui";
 
 const bundle = join(import.meta.dirname, "..", "paste.test.bundle.mjs");
 execSync(`npx esbuild ${join(import.meta.dirname, "..", "paste.ts")} --bundle --format=esm --platform=node --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui --outfile=${bundle}`, { stdio: "pipe" });
-const { figureLabelAtColumn, upgradePastePaths, default: registerPaste } = await import(bundle);
+const { figureLabelAtColumn, figureViewport, upgradePastePaths, default: registerPaste } = await import(bundle);
 
 const TMP = "/tmp";
 const U = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
@@ -158,4 +158,17 @@ assert.deepEqual(figureLabelAtColumn(renderedDraft, 8), { number: 1, column: 3 }
 assert.equal(figureLabelAtColumn(renderedDraft, 9), undefined);
 assert.deepEqual(figureLabelAtColumn(renderedDraft, 10), { number: 2, column: 10 });
 
-console.log("test-paste: attachment and figure link assertions passed");
+setCellDimensions({ widthPx: 10, heightPx: 20 });
+const picture = { width: 1200, height: 600 };
+const center = { x: 0.5, y: 0.5 };
+assert.deepEqual(figureViewport(picture, 80, 30, 1, center), {
+	cropX: 0, cropY: 0, cropWidth: 1200, cropHeight: 600, columns: 80, rows: 20,
+});
+assert.deepEqual(figureViewport(picture, 80, 30, 2, center), {
+	cropX: 300, cropY: 75, cropWidth: 600, cropHeight: 450, columns: 80, rows: 30,
+});
+assert.deepEqual(figureViewport(picture, 80, 30, 2, { x: 1, y: 0 }), {
+	cropX: 600, cropY: 0, cropWidth: 600, cropHeight: 450, columns: 80, rows: 30,
+});
+
+console.log("test-paste: attachment, figure link, and viewer assertions passed");

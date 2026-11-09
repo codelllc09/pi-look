@@ -15,8 +15,9 @@ import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { CustomEditor, resizeImage, type ExtensionAPI, type ResizedImage } from "@earendil-works/pi-coding-agent";
 import {
-	Container, Image, Text, getCapabilities, getImageDimensions, getOsc8LinkAtColumn, hyperlink, stripTerminalSequences,
-	visibleWidth, type EditorComponent, type OverlayHandle, type TUI, type TuiAltScreen, type TuiMouseEvent,
+	Container, Image, Text, getCapabilities, getCellDimensions, getImageDimensions, getOsc8LinkAtColumn, hyperlink,
+	matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, type Component, type EditorComponent,
+	type OverlayHandle, type TUI, type TuiAltScreen, type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 
 interface ImageContent {
@@ -64,7 +65,7 @@ export function figureLabelAtColumn(line: string, column: number): { number: num
 	}
 }
 
-async function readThumbnail(path: string): Promise<ResizedImage | null> {
+async function readFigure(path: string, options: Parameters<typeof resizeImage>[2]): Promise<ResizedImage | null> {
 	const mime = MIME_BY_EXT[path.split(".").pop() ?? ""];
 	const stat = await fs.promises.stat(path);
 	// Bound encoded input and decoded pixels before starting Pi's resize worker.
@@ -73,7 +74,124 @@ async function readThumbnail(path: string): Promise<ResizedImage | null> {
 	if (bytes.length > 12 * 1024 * 1024) return null;
 	const size = getImageDimensions(bytes.toString("base64"), mime);
 	if (!size || size.widthPx * size.heightPx > 16_000_000) return null;
-	return resizeImage(bytes, mime, { maxWidth: 384, maxHeight: 240, maxBytes: 256 * 1024 });
+	return resizeImage(bytes, mime, options);
+}
+
+const ZOOM_LEVELS = [1, 1.25, 1.5, 2, 2.5, 3, 4];
+
+function clamp(value: number, min: number, max: number): number {
+	return Math.min(max, Math.max(min, value));
+}
+
+export function figureViewport(
+	image: Pick<ResizedImage, "width" | "height">, width: number, height: number, zoom: number, center: { x: number; y: number },
+) {
+	const cell = getCellDimensions();
+	const scale = zoom * Math.min(width * cell.widthPx / image.width, height * cell.heightPx / image.height);
+	const cropWidth = zoom === 1 ? image.width : clamp(Math.floor(width * cell.widthPx / scale), 1, image.width);
+	const cropHeight = zoom === 1 ? image.height : clamp(Math.floor(height * cell.heightPx / scale), 1, image.height);
+	return {
+		cropX: clamp(Math.round(center.x * image.width - cropWidth / 2), 0, image.width - cropWidth),
+		cropY: clamp(Math.round(center.y * image.height - cropHeight / 2), 0, image.height - cropHeight),
+		cropWidth,
+		cropHeight,
+		columns: clamp(Math.round(cropWidth * scale / cell.widthPx), 1, width),
+		rows: clamp(Math.round(cropHeight * scale / cell.heightPx), 1, height),
+	};
+}
+
+function figureViewer(tui: TUI, number: number, close: () => void) {
+	let image: ResizedImage | null | undefined;
+	let component: Image | undefined;
+	let zoomLevel = 0;
+	let center = { x: 0.5, y: 0.5 };
+	let viewport: ReturnType<typeof figureViewport> | undefined;
+	let bounds: { x: number; y: number; width: number; height: number } | undefined;
+	let drag: { x: number; y: number } | undefined;
+	let placement: { prefix: string; upload: string; line: string } | undefined;
+	const zoomTo = (level: number) => {
+		if (!image) return;
+		const next = clamp(level, 0, ZOOM_LEVELS.length - 1);
+		if (next === zoomLevel) return;
+		zoomLevel = next;
+		if (next === 0) center = { x: 0.5, y: 0.5 };
+		tui.requestRender();
+	};
+	const pan = (dx: number, dy: number) => {
+		if (!zoomLevel || !viewport || !image) return;
+		const { cropWidth, cropHeight, columns, rows } = viewport;
+		const offset = (position: number, delta: number, pixels: number, crop: number, cells: number) => {
+			const min = crop / 2;
+			const max = pixels - min;
+			return clamp(clamp(position * pixels, min, max) + delta * crop / cells, min, max) / pixels;
+		};
+		center = {
+			x: offset(center.x, dx, image.width, cropWidth, columns),
+			y: offset(center.y, dy, image.height, cropHeight, rows),
+		};
+		tui.requestRender();
+	};
+	const panel: Component = {
+		invalidate: () => component?.invalidate(),
+		handleInput(data) {
+			if (matchesKey(data, "escape")) close();
+			else if (matchesKey(data, "+") || matchesKey(data, "=")) zoomTo(zoomLevel + 1);
+			else if (matchesKey(data, "-")) zoomTo(zoomLevel - 1);
+			else if (matchesKey(data, "0")) zoomTo(0);
+			else if (matchesKey(data, "left")) pan(-4, 0);
+			else if (matchesKey(data, "right")) pan(4, 0);
+			else if (matchesKey(data, "up")) pan(0, -2);
+			else if (matchesKey(data, "down")) pan(0, 2);
+		},
+		handleMouse(event) {
+			const inside = bounds && event.x >= bounds.x && event.y >= bounds.y &&
+				event.x < bounds.x + bounds.width && event.y < bounds.y + bounds.height;
+			if (event.type === "wheel" && event.wheelDelta) zoomTo(zoomLevel + (event.wheelDelta < 0 ? 1 : -1));
+			else if (event.type === "press" && event.button === "left" && inside) drag = { x: event.x, y: event.y };
+			else if (event.type === "drag" && drag) {
+				pan(drag.x - event.x, drag.y - event.y);
+				drag = { x: event.x, y: event.y };
+			} else if (event.type === "release") drag = undefined;
+			else if (event.type === "click" && event.button === "left" && !inside) close();
+			return { handled: true, render: false };
+		},
+		render(width) {
+			const rows = Math.max(1, tui.terminal.rows);
+			const lines = Array<string>(rows).fill("");
+			const size = image ? ` · ${image.originalWidth}×${image.originalHeight}` : "";
+			lines[0] = truncateToWidth(`Image [fig${number}]${size} · ${ZOOM_LEVELS[zoomLevel] * 100}% · Esc to close`, width);
+			bounds = undefined;
+			viewport = undefined;
+			if (rows < 4) return lines;
+			if (!image) {
+				lines[Math.floor(rows / 2)] = truncateToWidth(image === null ? "Image unavailable" : "Loading image…", width);
+				return lines;
+			}
+			component ??= new Image(image.data, image.mimeType, { fallbackColor: (text) => text });
+			const nativeImage = component.render(40)[0];
+			const header = /^\x1b_G([^;]*);/.exec(nativeImage);
+			if (!header) {
+				lines[Math.floor(rows / 2)] = truncateToWidth(nativeImage, width);
+				return lines;
+			}
+			viewport = figureViewport(image, Math.max(1, width - 2), rows - 3, ZOOM_LEVELS[zoomLevel], center);
+			const { cropX, cropY, cropWidth, cropHeight, columns, rows: imageRows } = viewport;
+			const x = Math.floor((width - columns) / 2);
+			const y = Math.floor((rows - imageRows) / 2);
+			// Keep the native Image upload and ID. Pi's compositor can reuse it for each cropped placement.
+			const controls = header[1].replace(/,[cr]=\d+/g, "");
+			const prefix = " ".repeat(x) +
+				`\x1b_G${controls},c=${columns},r=${imageRows},x=${cropX},y=${cropY},w=${cropWidth},h=${cropHeight};`;
+			if (placement?.prefix !== prefix || placement.upload !== nativeImage) {
+				placement = { prefix, upload: nativeImage, line: prefix + nativeImage.slice(header[0].length) };
+			}
+			lines[y] = placement.line;
+			lines[rows - 1] = truncateToWidth("Wheel / +/- Zoom   0 Fit   Drag / arrows Pan", width);
+			bounds = { x, y, width: columns, height: imageRows };
+			return lines;
+		},
+	};
+	return { panel, setImage: (result: ResizedImage | null) => { image = result; } };
 }
 
 function attachFigurePreview(
@@ -96,6 +214,8 @@ function attachFigurePreview(
 	let openTimer: ReturnType<typeof setTimeout> | undefined;
 	let idleTimer: ReturnType<typeof setTimeout> | undefined;
 	let overlay: OverlayHandle | undefined;
+	let viewer: OverlayHandle | undefined;
+	let pressedFigure: (NonNullable<typeof hovered> & { x: number }) | undefined;
 	let cached: { path: string; image: ResizedImage } | undefined;
 	let loading = Promise.resolve();
 
@@ -110,7 +230,9 @@ function attachFigurePreview(
 		const stillHere = () => hovered === target && supported() && showImages() && !tui.hasOverlay() &&
 			figureAt(target.column, target.row, target.transcript)?.path === target.path;
 		if (!stillHere()) return;
-		const image = cached?.path === target.path ? cached.image : await readThumbnail(target.path);
+		const image = cached?.path === target.path ? cached.image : await readFigure(target.path, {
+			maxWidth: 384, maxHeight: 240, maxBytes: 256 * 1024,
+		});
 		if (!image || !stillHere()) return;
 		cached = { path: target.path, image };
 
@@ -132,6 +254,24 @@ function attachFigurePreview(
 			col: Math.min(target.column, columns - width),
 			nonCapturing: true,
 			visible: (w, h) => w === columns && h === rows,
+		});
+	};
+	const closeViewer = () => {
+		viewer?.hide();
+		viewer = undefined;
+	};
+	const openViewer = (target: NonNullable<typeof hovered>) => {
+		const { panel, setImage } = figureViewer(tui, target.number, closeViewer);
+		const handle = tui.showOverlay(panel, { width: "100%" });
+		viewer = handle;
+		loading = loading.then(async () => {
+			if (viewer !== handle) return;
+			const image = await readFigure(target.path, {
+				maxWidth: 1920, maxHeight: 1440, maxBytes: 2 * 1024 * 1024,
+			}).catch(() => null);
+			if (viewer !== handle) return;
+			setImage(image);
+			tui.requestRender();
 		});
 	};
 	const observe = (event: TuiMouseEvent, transcript: boolean) => {
@@ -156,13 +296,34 @@ function attachFigurePreview(
 	};
 
 	// Pi mounts its transcript document as the first top-level component.
-	// Observe its events and leave selection, link activation and scrolling to Pi.
+	// Keep Pi's selection and scrolling. Intercept only the release of a figure click.
 	const document = tui.children?.[0];
 	let detachTranscript: (() => void) | undefined;
 	if (document instanceof Container) {
 		const documentMouse = document.handleMouse;
-		const transcriptMouse = (event: TuiMouseEvent) => {
+		const transcriptMouse: typeof documentMouse = (event) => {
 			observe(event, true);
+			const pressed = pressedFigure;
+			pressedFigure = undefined;
+			const { screenX, screenY } = event;
+			if ((event.type === "press" || (event.type === "release" && pressed)) &&
+				!event.shift && !event.alt && !event.ctrl && supported() && showImages() && !tui.hasOverlay() &&
+				typeof screen.resetTextSelection === "function") {
+				if (event.type === "press" && event.button === "left") {
+					const figure = figureAt(screenX, screenY, true);
+					if (figure) pressedFigure = { ...figure, x: screenX };
+				} else if (event.type === "release" && pressed?.x === screenX && pressed.row === screenY &&
+					(event.button === "left" || event.button === "none") &&
+					figureAt(screenX, screenY, true)?.path === pressed.path) {
+					screen.resetTextSelection();
+					openViewer(pressed);
+					return {
+						handled: true,
+						target: { component: document, originX: screenX - event.x, originY: screenY - event.y,
+							width: event.width, height: event.height },
+					};
+				}
+			}
 			return documentMouse.call(document, event);
 		};
 		document.handleMouse = transcriptMouse;
@@ -172,6 +333,7 @@ function attachFigurePreview(
 	}
 	const editorMouse = editor.handleMouse;
 	const draftMouse = (event: TuiMouseEvent) => {
+		pressedFigure = undefined;
 		observe(event, false);
 		return editorMouse?.call(editor, event);
 	};
@@ -186,6 +348,7 @@ function attachFigurePreview(
 		dismiss,
 		dispose: () => {
 			dismiss();
+			closeViewer();
 			detachTranscript?.();
 			if (editor.handleMouse === draftMouse) editor.handleMouse = editorMouse;
 			if (editor.handleInput === handleInput) editor.handleInput = editorInput;

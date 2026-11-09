@@ -72,16 +72,18 @@ so on immediately. On submit, `paste.ts` resolves the labels to image paths:
 - **text-only model**: the path lets the model call `look` or use the
   read takeover.
 
-The interactive transcript keeps the same session-scoped labels. With
-terminal hyperlinks enabled, click a figure in Pi fullscreen to open its
-file in the system viewer. In regular mode the terminal handles the click.
-Terminals without hyperlinks show plain short labels. Opening a figure
-uses Pi's temporary image file.
+The transcript keeps the same session-scoped labels. In Pi fullscreen with
+Kitty graphics and hyperlinks enabled, click a sent figure link to view it
+inside Pi. Use the wheel or `+`/`-` to zoom, drag or use the arrow keys to
+pan, and press `0` to fit. Press `Esc` or click outside the image to close.
+Without Kitty graphics, Pi fullscreen opens the file in the system viewer.
+In regular mode the terminal handles hyperlinks. Without hyperlinks, the
+transcript shows plain labels.
 
-In Pi fullscreen with Kitty graphics enabled, hover over a figure label
-in the editor or a figure link in a sent message to preview a thumbnail.
-Typing, scrolling, or moving away within the same area closes it.
-The preview also closes after three seconds without a mouse move over the label.
+Hover over a draft label or a sent figure link to preview a thumbnail
+in Kitty fullscreen. Typing, scrolling, or moving away within the same
+area closes it. It also closes after three seconds without a mouse move
+over the label. Both views use Pi's temporary image file.
 
 No chips, no cards, no rejection. If a third-party paste extension (e.g.
 pi-image-paste-cards) is installed, remove it — it rejects sends for text-only
