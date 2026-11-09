@@ -79,9 +79,9 @@ Terminals without hyperlinks show plain short labels. Opening a figure
 uses Pi's temporary image file.
 
 In Pi fullscreen with Kitty graphics enabled, hover over a figure label
-in the editor to preview a thumbnail before sending. Typing or moving to
-another part of the editor closes the preview. It also closes after
-three seconds without a mouse move over the label.
+in the editor or a figure link in a sent message to preview a thumbnail.
+Typing, scrolling, or moving away within the same area closes it.
+The preview also closes after three seconds without a mouse move over the label.
 
 No chips, no cards, no rejection. If a third-party paste extension (e.g.
 pi-image-paste-cards) is installed, remove it — it rejects sends for text-only

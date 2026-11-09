@@ -15,8 +15,8 @@ import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { CustomEditor, resizeImage, type ExtensionAPI, type ResizedImage } from "@earendil-works/pi-coding-agent";
 import {
-	Container, Image, Text, getCapabilities, getImageDimensions, hyperlink, stripTerminalSequences, visibleWidth,
-	type EditorComponent, type OverlayHandle, type TUI, type TuiAltScreen,
+	Container, Image, Text, getCapabilities, getImageDimensions, getOsc8LinkAtColumn, hyperlink, stripTerminalSequences,
+	visibleWidth, type EditorComponent, type OverlayHandle, type TUI, type TuiAltScreen, type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 
 interface ImageContent {
@@ -53,8 +53,8 @@ function isCommandDraft(text: string): boolean {
 	return start.startsWith("!") || /^\/[\w:-]+(?:\s|$)/.test(start);
 }
 
-/** Match against the rendered draft so ANSI styling and wide characters count correctly. */
-export function draftFigureAtColumn(line: string, column: number): { number: number; column: number } | undefined {
+/** Match against the rendered line so ANSI styling and wide characters count correctly. */
+export function figureLabelAtColumn(line: string, column: number): { number: number; column: number } | undefined {
 	const text = stripTerminalSequences(line);
 	for (const match of text.matchAll(FIGURE_LABEL)) {
 		const start = visibleWidth(text.slice(0, match.index));
@@ -76,15 +76,23 @@ async function readThumbnail(path: string): Promise<ResizedImage | null> {
 	return resizeImage(bytes, mime, { maxWidth: 384, maxHeight: 240, maxBytes: 256 * 1024 });
 }
 
-function attachDraftPreview(
+function attachFigurePreview(
 	editor: EditorComponent, tui: TUI, paths: readonly string[], showImages: () => boolean,
-): () => void {
+) {
 	// getScreenLines is a public API of Pi's fullscreen renderer.
 	const screen = tui as Partial<TuiAltScreen>;
-	if (typeof screen?.getScreenLines !== "function") return () => {};
-	const frame = screen.getScreenLines.bind(screen);
-	const supported = () => tui.mode === "fullscreen" && getCapabilities().images === "kitty";
-	let hovered: { number: number; column: number; row: number; path: string } | undefined;
+	if (!screen) return;
+	const supported = () => tui.mode === "fullscreen" && getCapabilities().images === "kitty" &&
+		typeof screen.getScreenLines === "function";
+	const figureAt = (column: number, row: number, transcript: boolean) => {
+		const line = screen.getScreenLines?.()[row] ?? "";
+		const hit = figureLabelAtColumn(line, column);
+		const path = hit && paths[hit.number - 1];
+		if (!hit || !path) return;
+		if (transcript && getOsc8LinkAtColumn(line, column) !== pathToFileURL(path).href) return;
+		return { ...hit, row, path, transcript };
+	};
+	let hovered: ReturnType<typeof figureAt>;
 	let openTimer: ReturnType<typeof setTimeout> | undefined;
 	let idleTimer: ReturnType<typeof setTimeout> | undefined;
 	let overlay: OverlayHandle | undefined;
@@ -100,7 +108,7 @@ function attachDraftPreview(
 	};
 	const show = async (target: NonNullable<typeof hovered>) => {
 		const stillHere = () => hovered === target && supported() && showImages() && !tui.hasOverlay() &&
-			draftFigureAtColumn(frame()[target.row] ?? "", target.column)?.number === target.number;
+			figureAt(target.column, target.row, target.transcript)?.path === target.path;
 		if (!stillHere()) return;
 		const image = cached?.path === target.path ? cached.image : await readThumbnail(target.path);
 		if (!image || !stillHere()) return;
@@ -126,35 +134,63 @@ function attachDraftPreview(
 			visible: (w, h) => w === columns && h === rows,
 		});
 	};
-	const mouse = editor.handleMouse?.bind(editor);
-	editor.handleMouse = (event) => {
-		const hit = event.type === "move" && supported()
-			? draftFigureAtColumn(frame()[event.screenY] ?? "", event.screenX) : undefined;
-		const path = hit && paths[hit.number - 1];
-		if (!hit || !path) {
+	const observe = (event: TuiMouseEvent, transcript: boolean) => {
+		const target = event.type === "move" && supported()
+			? figureAt(event.screenX, event.screenY, transcript) : undefined;
+		if (!target) {
 			dismiss();
-		} else {
-			if (hovered?.number !== hit.number || hovered.row !== event.screenY || hovered.column !== hit.column) {
-				dismiss();
-				const target = { ...hit, row: event.screenY, path };
-				hovered = target;
-				openTimer = setTimeout(() => {
-					// Serialize resizes. Stale requests bail out before reading or displaying.
-					loading = loading.then(() => show(target)).catch(() => {});
-				}, 250);
-			}
-			clearTimeout(idleTimer);
-			// Pi dispatches moves inside this editor only. Expire if the pointer goes elsewhere.
-			idleTimer = setTimeout(dismiss, 3_000);
+			return;
 		}
-		return mouse?.(event);
+		if (hovered?.path !== target.path || hovered.row !== target.row ||
+			hovered.column !== target.column || hovered.transcript !== transcript) {
+			dismiss();
+			hovered = target;
+			openTimer = setTimeout(() => {
+				// Serialize resizes. Stale requests bail out before reading or displaying.
+				loading = loading.then(() => show(target)).catch(() => {});
+			}, 250);
+		}
+		clearTimeout(idleTimer);
+		// Pi dispatches moves inside the owning component only. Expire on idle.
+		idleTimer = setTimeout(dismiss, 3_000);
 	};
-	const input = editor.handleInput.bind(editor);
-	editor.handleInput = (data) => {
+
+	// Pi mounts its transcript document as the first top-level component.
+	// Observe its events and leave selection, link activation and scrolling to Pi.
+	const document = tui.children?.[0];
+	let detachTranscript: (() => void) | undefined;
+	if (document instanceof Container) {
+		const documentMouse = document.handleMouse;
+		const transcriptMouse = (event: TuiMouseEvent) => {
+			observe(event, true);
+			return documentMouse.call(document, event);
+		};
+		document.handleMouse = transcriptMouse;
+		detachTranscript = () => {
+			if (document.handleMouse === transcriptMouse) document.handleMouse = documentMouse;
+		};
+	}
+	const editorMouse = editor.handleMouse;
+	const draftMouse = (event: TuiMouseEvent) => {
+		observe(event, false);
+		return editorMouse?.call(editor, event);
+	};
+	editor.handleMouse = draftMouse;
+	const editorInput = editor.handleInput;
+	const handleInput = (data: string) => {
 		dismiss();
-		input(data);
+		editorInput.call(editor, data);
 	};
-	return dismiss;
+	editor.handleInput = handleInput;
+	return {
+		dismiss,
+		dispose: () => {
+			dismiss();
+			detachTranscript?.();
+			if (editor.handleMouse === draftMouse) editor.handleMouse = editorMouse;
+			if (editor.handleInput === handleInput) editor.handleInput = editorInput;
+		},
+	};
 }
 
 /**
@@ -191,7 +227,7 @@ export default function (pi: ExtensionAPI) {
 	const references = pasteReferences(tmp);
 	const figures = new Map<string, number>();
 	const paths: string[] = [];
-	let dismissPreview = () => {};
+	let disposePreview: (() => void) | undefined;
 	const remember = (path: string): number => {
 		const known = figures.get(path);
 		if (known !== undefined) return known;
@@ -223,9 +259,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	if (typeof pi.registerMarkdownTransformer === "function") {
-		pi.on("session_shutdown", () => dismissPreview());
+		pi.on("session_shutdown", () => disposePreview?.());
 		pi.on("session_start", (_event, ctx) => {
-			dismissPreview();
+			disposePreview?.();
+			disposePreview = undefined;
 			figures.clear();
 			paths.length = 0;
 			if (ctx.mode !== "tui") return;
@@ -242,13 +279,13 @@ export default function (pi: ExtensionAPI) {
 			const previous = ctx.ui.getEditorComponent?.();
 			ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 				const editor = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
-				dismissPreview();
-				const dismiss = attachDraftPreview(editor, tui, paths, () => pi.getSettings?.().terminal?.showImages !== false);
-				dismissPreview = dismiss;
+				disposePreview?.();
+				const preview = attachFigurePreview(editor, tui, paths, () => pi.getSettings?.().terminal?.showImages !== false);
+				disposePreview = preview?.dispose;
 				const insert = editor.insertTextAtCursor?.bind(editor);
 				if (insert) {
 					editor.insertTextAtCursor = (text) => {
-						dismiss();
+						preview?.dismiss();
 						const image = findPastePaths(text, references).has(text);
 						insert(image && !isCommandDraft(editor.getText()) ? shortenDraft(text) : text);
 					};
@@ -256,7 +293,7 @@ export default function (pi: ExtensionAPI) {
 				const setText = editor.setText.bind(editor);
 				let submitWired = false;
 				editor.setText = (text) => {
-					dismiss();
+					preview?.dismiss();
 					// Pi installs onSubmit before handing the editor its draft.
 					// Commands bypass input hooks, so restore bare paths there.
 					const submit = editor.onSubmit?.bind(editor);

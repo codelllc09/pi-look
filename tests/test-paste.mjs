@@ -10,7 +10,7 @@ import { getOsc8LinkAtColumn, setCapabilities, stripTerminalSequences } from "@e
 
 const bundle = join(import.meta.dirname, "..", "paste.test.bundle.mjs");
 execSync(`npx esbuild ${join(import.meta.dirname, "..", "paste.ts")} --bundle --format=esm --platform=node --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui --outfile=${bundle}`, { stdio: "pipe" });
-const { draftFigureAtColumn, upgradePastePaths, default: registerPaste } = await import(bundle);
+const { figureLabelAtColumn, upgradePastePaths, default: registerPaste } = await import(bundle);
 
 const TMP = "/tmp";
 const U = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
@@ -152,10 +152,10 @@ draft.insertTextAtCursor(second);
 assert.equal(draft.getText(), `! cat ${second}`);
 
 const renderedDraft = "\x1b[36m看 [fig1] [fig2]\x1b[0m";
-assert.equal(draftFigureAtColumn(renderedDraft, 2), undefined);
-assert.deepEqual(draftFigureAtColumn(renderedDraft, 3), { number: 1, column: 3 });
-assert.deepEqual(draftFigureAtColumn(renderedDraft, 8), { number: 1, column: 3 });
-assert.equal(draftFigureAtColumn(renderedDraft, 9), undefined);
-assert.deepEqual(draftFigureAtColumn(renderedDraft, 10), { number: 2, column: 10 });
+assert.equal(figureLabelAtColumn(renderedDraft, 2), undefined);
+assert.deepEqual(figureLabelAtColumn(renderedDraft, 3), { number: 1, column: 3 });
+assert.deepEqual(figureLabelAtColumn(renderedDraft, 8), { number: 1, column: 3 });
+assert.equal(figureLabelAtColumn(renderedDraft, 9), undefined);
+assert.deepEqual(figureLabelAtColumn(renderedDraft, 10), { number: 2, column: 10 });
 
 console.log("test-paste: attachment and figure link assertions passed");
