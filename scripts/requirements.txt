@@ -11,8 +11,4 @@ pillow>=13,<14
 rapidocr>=3.10,<4
 numpy>=2
 onnxruntime>=1.31,<2
-
-# Guaranteed-present (not imported by analyze.py): the model's bash-domain CV
-# work can rely on cv2 being here instead of probing or re-installing. New
-# Stacks beyond classical CV stay on-demand installs in the bash domain.
-opencv-contrib-python-headless>=5.0,<6
+# RapidOCR installs opencv-python-headless for cv2.

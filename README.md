@@ -157,12 +157,12 @@ logged. Endpoints are OpenAI-compatible; add providers in `ENDPOINTS`.
 
 ## Install
 
-Analyzer deps (Pillow = pixel stats lane, RapidOCR = OCR lane; heavier CV —
-opencv etc. — is deliberately NOT a dependency, it stays in the model's
-bash domain). Pinned in `scripts/requirements.txt` for fixture comparability:
+Pillow and NumPy provide pixel stats. RapidOCR uses ONNX Runtime for OCR
+and installs headless OpenCV. The supported dependency ranges are in
+`scripts/requirements.txt`.
 
 ```bash
-uv pip install -r scripts/requirements.txt   # or your usual pip/venv
+uv pip install -r scripts/requirements.txt
 pi install npm:pi-look
 ```
 

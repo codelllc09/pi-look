@@ -38,6 +38,7 @@ assert.equal(shouldTierRetry(A(20, 5), "v4-mobile"), false);
 assert.equal(shouldTierRetry(A(6, 0, 6), undefined), false);
 assert.equal(shouldTierRetry(A(12, 6, 6), undefined), false);
 assert.equal(shouldTierRetry(A(16, 5, 6), undefined), true);
+assert.equal(shouldTierRetry({ ...A(20, 0), ocr: { available: false, lines: [] } }, undefined), false);
 
 // ---- fmtAnalysis rendering (batch 3) ----
 const AX = {

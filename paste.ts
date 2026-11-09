@@ -40,9 +40,9 @@ const MIME_BY_EXT: Record<string, string> = {
 };
 
 function pasteReferences(tmp: string): RegExp {
-	const escaped = tmp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const prefix = join(tmp, "pi-").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	// Keep an inner /tmp/... or a prefix of a longer filename from matching.
-	const path = `(?<![\\w/])${escaped}/pi-(?:clipboard|look)-[0-9a-f-]{36}\\.(?:png|jpe?g|webp|gif|bmp)(?![\\w/]|\\.\\w)`;
+	const path = `(?<![\\w/\\\\])${prefix}(?:clipboard|look)-[0-9a-f-]{36}\\.(?:png|jpe?g|webp|gif|bmp)(?![\\w/\\\\]|\\.\\w)`;
 	return new RegExp(`\\[image: (${path})\\]|(${path})`, "g");
 }
 
@@ -681,7 +681,11 @@ export default function (pi: ExtensionAPI) {
 			}
 		});
 		if (!upgraded) return expanded;
-		const images: ImageContent[] = [...(event.images ?? []), ...upgraded.images.map((i) => ({ type: "image" as const, ...i }))];
+		const attached = event.images ?? [];
+		const newImages = upgraded.images.filter((image) =>
+			!attached.some((other) => other.mimeType === image.mimeType && other.data === image.data),
+		);
+		const images: ImageContent[] = [...attached, ...newImages.map((i) => ({ type: "image" as const, ...i }))];
 		return { action: "transform", text: upgraded.text, images };
 	});
 }

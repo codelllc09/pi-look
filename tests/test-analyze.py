@@ -9,7 +9,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
@@ -17,7 +19,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
 sys.path.insert(0, str(ROOT))
-from scripts.analyze import _blob_stats, lane0
+from scripts.analyze import _blob_stats, lane0, main
 
 
 def find_cjk_font() -> str | None:
@@ -72,6 +74,18 @@ def make_layout_image(path: str, cells: list[tuple[int, int, str]], size: tuple[
 
 
 class AnalyzerTests(unittest.TestCase):
+    def test_ocr_failure_keeps_local_stats(self):
+        image = ROOT / "tests/fixtures/judge-2026-11-01/judge3.png"
+        stdout = io.StringIO()
+        with patch.object(sys, "argv", ["analyze.py", str(image)]), patch(
+            "rapidocr.RapidOCR", side_effect=RuntimeError("OCR runtime unavailable")
+        ), redirect_stdout(stdout):
+            self.assertEqual(main(), 0)
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["stats"]["width"], 760)
+        self.assertFalse(result["ocr"]["available"])
+        self.assertIn("OCR runtime unavailable", result["ocr"]["error"])
+
     def test_exif_coordinates_match_ocr_and_relay(self):
         display = Image.new("RGB", (240, 400), "white")
         ImageDraw.Draw(display).text((20, 300), "TEST 12345", fill="black", font=ImageFont.load_default(size=26))

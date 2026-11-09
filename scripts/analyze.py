@@ -402,23 +402,23 @@ def _detect_tables(lines: list) -> list:
 def lane1(img: Image.Image, tier: str = "v6-small") -> dict:
     try:
         from rapidocr import RapidOCR, EngineType, ModelType, OCRVersion
-    except Exception as e:  # pragma: no cover - environment dependent
+
+        tiers = {
+            "v6-small": (OCRVersion.PPOCRV6, ModelType.SMALL),
+            "v6-medium": (OCRVersion.PPOCRV6, ModelType.MEDIUM),
+            "v5-mobile": (OCRVersion.PPOCRV5, ModelType.MOBILE),
+            "v5-server": (OCRVersion.PPOCRV5, ModelType.SERVER),
+            "v4-mobile": (OCRVersion.PPOCRV4, ModelType.MOBILE),
+        }
+        version, model_type = tiers.get(tier, tiers["v6-small"])
+        params = {}
+        for stage in ("Det", "Rec"):
+            params[f"{stage}.engine_type"] = EngineType.ONNXRUNTIME
+            params[f"{stage}.ocr_version"] = version
+            params[f"{stage}.model_type"] = model_type
+        result = RapidOCR(params=params)(img)
+    except Exception as e:
         return {"available": False, "error": f"rapidocr unavailable: {e}", "lines": [], "avgConf": None, "text": "", "tofuCount": 0}
-    tiers = {
-        "v6-small": (OCRVersion.PPOCRV6, ModelType.SMALL),
-        "v6-medium": (OCRVersion.PPOCRV6, ModelType.MEDIUM),
-        "v5-mobile": (OCRVersion.PPOCRV5, ModelType.MOBILE),
-        "v5-server": (OCRVersion.PPOCRV5, ModelType.SERVER),
-        "v4-mobile": (OCRVersion.PPOCRV4, ModelType.MOBILE),
-    }
-    version, model_type = tiers.get(tier, tiers["v6-small"])
-    params = {}
-    for stage in ("Det", "Rec"):
-        params[f"{stage}.engine_type"] = EngineType.ONNXRUNTIME
-        params[f"{stage}.ocr_version"] = version
-        params[f"{stage}.model_type"] = model_type
-    ocr = RapidOCR(params=params)
-    result = ocr(img)
     # numpy arrays: `or []` triggers ambiguous-truth ValueError — test against None
     txts = list(result.txts) if result.txts is not None else []
     scores = list(result.scores) if result.scores is not None else []

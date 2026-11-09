@@ -131,12 +131,11 @@ API 密钥读自 `<agent-dir>/auth.json[provider].key`，永不落日志。
 pi install npm:pi-look
 ```
 
-分析器依赖（Pillow = 像素统计车道，RapidOCR = OCR 车道；更重的 CV——
-opencv 等——刻意不做依赖，留在模型的 bash 域内）。版本钉死在
-`scripts/requirements.txt` 以保证语料可比性：
+Pillow 和 NumPy 提供像素统计。RapidOCR 使用 ONNX Runtime，并会安装
+无界面的 OpenCV。支持的依赖版本范围见 `scripts/requirements.txt`。
 
 ```bash
-uv pip install -r scripts/requirements.txt   # 或你习惯的 pip/venv 方式
+uv pip install -r scripts/requirements.txt
 ```
 
 ## 开发

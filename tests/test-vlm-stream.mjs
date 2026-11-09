@@ -3,7 +3,7 @@
  * onUpdate forwarding, taskwatcher status file, non-stream fallback, abort. */
 import { execSync } from "node:child_process";
 import assert from "node:assert";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, statSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import http from "node:http";
@@ -16,7 +16,8 @@ const agent = mkdtempSync(join(tmpdir(), "look-vlm-agent-"));
 const statusDir = mkdtempSync(join(tmpdir(), "look-vlm-status-"));
 process.env.PI_CODING_AGENT_DIR = agent;
 process.env.PI_TASK_STATUS_DIR = statusDir;
-writeFileSync(join(agent, "auth.json"), JSON.stringify({ mockprov: { type: "api", key: "sk-test" } }));
+const mockKey = "sk-test";
+writeFileSync(join(agent, "auth.json"), JSON.stringify({ mockprov: { type: "api", key: mockKey } }));
 // tiny valid PNG (1x1)
 const png = join(agent, "px.png");
 writeFileSync(png, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mPkz8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==", "base64"));
@@ -41,12 +42,13 @@ const sseHeaders = { "Content-Type": "text/event-stream", "Cache-Control": "no-c
 {
 	const updates = [];
 	const chunks = [
-		// frame split across TCP writes + CRLF line endings + string delta
-		'data: {"choices":[{"delta":{"content":"Hel',
-		'lo"}}]}\r\n\r\ndata: {"choices":[{"delta":{"content":[" wor","ld"]}}]}\n\n', // array delta (zai style)
-		'data: {"choices":[{"delta":{}},{"delta":{"reasoning_content":"ignore me"},"finish_reason":null}]}\n\n',
-		'data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}\n\n',
-		"data: [DONE]\n\n",
+		// Multiline data and a CRLF pair split across chunks.
+		'data: {"choices":\r\ndata: [{"delta":{"content":"Hel',
+		'lo"}}]}\r\n\r',
+		'\ndata: {"choices":[{"delta":{"content":[" wor","ld"]}}]}\r\r',
+		'data: {"choices":[{"delta":{"reasoning_content":"ignore me"}}]}\r\n\r\n',
+		'data: {"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}\r\n\r\n',
+		"data: [DONE]\r\r",
 	];
 	handler = async (req, res) => {
 		const body = await readBody(req);
@@ -54,11 +56,13 @@ const sseHeaders = { "Content-Type": "text/event-stream", "Cache-Control": "no-c
 		assert.equal(body.model, "mock-1");
 		res.writeHead(200, sseHeaders);
 		for (const c of chunks) { res.write(c); await new Promise((r) => setTimeout(r, 30)); }
-		res.end();
+		// Leave the connection open after [DONE]. The reader should cancel it.
 	};
-	const answer = await callVLM(cfg, "q", png, "", { onUpdate: (u) => updates.push(u.content[0].text), taskId: "look-t1", owner: "sess-1" });
+	const answer = await callVLM(cfg, "q", png, "", {
+		onUpdate: (u) => updates.push(u.content[0].text), taskId: "look-t1", owner: "sess-1", signal: AbortSignal.timeout(4000),
+	});
 	assert.equal(answer, "Hello world!"); // split frame + CRLF + array/string deltas + reasoning_content ignored
-	done("SSE parsing: split frames, CRLF, array+string deltas, [DONE]");
+	done("SSE parsing: split CRLF, lone CR, multiline data, and [DONE] without EOF");
 	assert.ok(updates.some((t) => t.includes("asking")), "asking notice pushed");
 	assert.ok(updates.some((t) => t.includes("look:") && t.includes("streaming")), "streaming progress pushed");
 	done("onUpdate: asking + streaming notices forwarded");
@@ -112,6 +116,15 @@ const sseHeaders = { "Content-Type": "text/event-stream", "Cache-Control": "no-c
 	done("host abort rejects the in-flight VLM call");
 }
 
+{
+	handler = (_req, res) => res.writeHead(401).end(`Rejected credential ${mockKey}`);
+	await assert.rejects(
+		() => callVLM(cfg, "q", png, ""),
+		(error) => error.message.includes("HTTP 401") && error.message.includes("[redacted]") && !error.message.includes(mockKey),
+	);
+	done("HTTP errors redact a credential echoed by the endpoint");
+}
+
 // Tool entry point: analyzer flags, relay selection, and cancellation during retry.
 {
 	const analyzer = join(agent, "fake-python");
@@ -142,10 +155,34 @@ if (first === "--stats-only") {
 	const visionModel = { input: ["text", "image"] };
 	await hooks.session_start({}, { model: textModel });
 
-	const stats = await tool.execute("stats", { path: png, mode: "stats" });
+	const stats = await tool.execute("stats", { path: "px.png", mode: "stats" }, undefined, undefined, { cwd: agent });
 	assert.match(stats.content[0].text, /^\[stats\] 1x1/);
 	assert.ok(!stats.content[0].text.includes("[ocr]"));
-	done("stats mode requests pixel analysis only");
+	done("stats mode resolves relative paths in the host working directory");
+
+	const image = { type: "image", data: readFileSync(png, "base64"), mimeType: "image/png" };
+	const input = { source: "interactive", text: "See image", images: [image] };
+	const unknownModel = { input: [] };
+	assert.equal(await hooks.input(input, { model: unknownModel }), undefined);
+	const takeover = await hooks.input(input, { model: textModel });
+	assert.deepEqual(takeover.images, []);
+	const saved = takeover.text.match(/\[image: (.+)\]/)[1];
+	try {
+		assert.equal(readFileSync(saved, "base64"), image.data);
+		if (process.platform !== "win32") assert.equal(statSync(saved).mode & 0o777, 0o600);
+	} finally {
+		rmSync(saved);
+	}
+	const readEvent = {
+		toolName: "read", input: { path: "px.png" }, content: [{ type: "text", text: "Image" }, image],
+		structuredContent: { ...image, note: "Image" },
+	};
+	assert.equal(await hooks.tool_result(readEvent, { model: unknownModel, cwd: agent }), undefined);
+	assert.equal(await hooks.tool_result({ ...readEvent, parentToolCallId: "parent" }, { model: textModel, cwd: agent }), undefined);
+	const read = await hooks.tool_result(readEvent, { model: textModel, cwd: agent });
+	assert.match(read.content[0].text, /\[stats\] 1x1/);
+	assert.equal(read.structuredContent, read.content[0].text);
+	done("text-only takeover keeps image files private and read output structured");
 
 	const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
 	for (const [filename, mode, expected] of [

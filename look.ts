@@ -77,6 +77,8 @@ const expand = (p: string) => (p.startsWith("~/") ? path.join(os.homedir(), p.sl
 
 /** The models-store `input` declaration is authoritative — never infer vision from a model name. */
 const modelHasVision = (m: ExtensionContext["model"]) => Array.isArray(m?.input) && m.input.includes("image");
+const modelIsTextOnly = (m: ExtensionContext["model"]) =>
+	Array.isArray(m?.input) && m.input.includes("text") && !modelHasVision(m);
 const VISION_HINT = "[hint] Inspect the original image directly. Use read if you only have the path, and use these local results to verify details.";
 const RELAY_HINT = '[hint] semantics needed? call look(path, mode="vlm", question="...")';
 
@@ -110,7 +112,7 @@ function runAnalyzer(cfg: LookConfig, args: string[], signal?: AbortSignal): Pro
 			if (signal?.aborted) reject(signal.reason);
 			else if (spawnError) reject(spawnError);
 			else if (code === 0) resolve(out);
-			else reject(new Error(`analyzer exit ${code}: ${err.slice(0, 400)}`));
+			else reject(new Error(`analyzer exit ${code}: ${(err || out).trim().slice(0, 400)}`));
 		});
 	});
 }
@@ -162,8 +164,9 @@ async function analyze(cfg: LookConfig, imgPath: string, signal?: AbortSignal, o
  * remaining row bands after excluding wide, solid runs. */
 export function shouldTierRetry(a: Analysis, configuredTier: string | undefined): boolean {
 	if (configuredTier && configuredTier !== "v6-small") return false;
+	if (!a.ocr?.available) return false;
 	const rows = (a.stats?.estimatedTextRows ?? 0) - (a.stats?.solidRowBands ?? 0);
-	const lines = a.ocr?.lines.length ?? 0;
+	const lines = a.ocr.lines.length;
 	if (rows < 4) return false;
 	return lines <= Math.floor(rows / 2);
 }
@@ -251,35 +254,51 @@ export async function readSSE(res: Response, model: string, opts: VlmOpts, t0: n
 	const reader = res.body!.getReader();
 	const dec = new TextDecoder();
 	let buf = "";
+	const data: string[] = [];
+	let skipLeadingLF = false;
+	let ended = false;
 	try {
 		for (;;) {
 			const { done, value } = await reader.read();
-			if (done) break;
-			buf += dec.decode(value, { stream: true });
-			let sep: number;
-			while ((sep = buf.indexOf("\n\n")) >= 0) {
-				const frame = buf.slice(0, sep);
-				buf = buf.slice(sep + 2);
-				for (const raw of frame.split("\n")) {
-					const line = raw.replace(/\r$/, "");
-					if (!line.startsWith("data:")) continue;
-					const payload = line.slice(5).trimStart();
-					if (!payload || payload === "[DONE]") continue;
-					let j: { choices?: Array<{ delta?: { content?: unknown }; finish_reason?: string }> };
-					try { j = JSON.parse(payload); } catch { continue; /* skip malformed frame */ }
-					const c0 = j.choices?.[0];
-					let d = c0?.delta?.content ?? "";
-					if (Array.isArray(d)) d = d.map((c: unknown) => (typeof c === "string" ? c : (c as { text?: string })?.text ?? "")).join("");
-					if (d) text += String(d);
-					if (c0?.finish_reason) finish = c0.finish_reason;
-				}
+			let chunk = dec.decode(value, { stream: !done });
+			if (skipLeadingLF && chunk.length) {
+				if (chunk.startsWith("\n")) chunk = chunk.slice(1);
+				skipLeadingLF = false;
 			}
+			buf += chunk;
+			let offset = 0;
+			for (const eol of buf.matchAll(/\r\n|\r|\n/g)) {
+				const line = buf.slice(offset, eol.index);
+				offset = eol.index + eol[0].length;
+				// A CR can end a line by itself or be followed by an LF in the next chunk.
+				if (eol[0] === "\r" && offset === buf.length) skipLeadingLF = true;
+				if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+				else if (line === "data") data.push("");
+				if (line || !data.length) continue;
+				const payload = data.join("\n").trim();
+				data.length = 0;
+				if (payload === "[DONE]") {
+					ended = true;
+					break;
+				}
+				let j: { choices?: Array<{ delta?: { content?: unknown }; finish_reason?: string }> } | null;
+				try { j = JSON.parse(payload); } catch { continue; /* skip malformed frame */ }
+				const c0 = j?.choices?.[0];
+				let d = c0?.delta?.content ?? "";
+				if (Array.isArray(d)) d = d.map((c: unknown) => (typeof c === "string" ? c : (c as { text?: string })?.text ?? "")).join("");
+				if (d) text += String(d);
+				if (c0?.finish_reason) finish = c0.finish_reason;
+			}
+			buf = buf.slice(offset);
 			// first token arriving is itself news (long thinking just ended);
 			// afterwards content-driven ≥64 chars/≥2s, heartbeat ≥5s
 			if ((pushedLen === 0 && text) || (text.length - pushedLen >= 64 && Date.now() - lastPush >= 2000)) { pushedLen = text.length; push(); }
+			if (done || ended) break;
 		}
 	} finally {
 		clearInterval(heart);
+		if (ended) void reader.cancel().catch(() => {});
+		reader.releaseLock();
 	}
 	return { text: text.trim(), finish };
 }
@@ -291,6 +310,7 @@ export async function callVLM(cfg: LookConfig, question: string, imgPath: string
 	const model = cfg.visionModel.slice(slash + 1);
 	const endpoint = cfg.vlmEndpoints?.[provider] ?? ENDPOINTS[provider];
 	if (!endpoint) throw new Error(`no endpoint for provider "${provider}" — set vlmEndpoints["${provider}"] in pi-look.json`);
+	const key = apiKey(provider);
 	let imageUrl: string;
 	if (opts.image?.normalized) {
 		const out = await runAnalyzer(cfg, ["--relay", imgPath], opts.signal);
@@ -317,11 +337,14 @@ export async function callVLM(cfg: LookConfig, question: string, imgPath: string
 		const timeout = AbortSignal.timeout(180_000);
 		const res = await fetch(endpoint, {
 			method: "POST",
-			headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey(provider)}` },
+			headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
 			body: JSON.stringify(body),
 			signal: opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout,
 		});
-		if (!res.ok) throw new Error(`VLM ${provider}/${model} HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+		if (!res.ok) {
+			const detail = (await res.text()).replaceAll(key, "[redacted]").slice(0, 300);
+			throw new Error(`VLM ${provider}/${model} HTTP ${res.status}: ${detail}`);
+		}
 		if (!stream || !res.body) {
 			const out = (await res.json()) as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string }> };
 			let content = out.choices?.[0]?.message?.content ?? "";
@@ -436,7 +459,7 @@ export default function (pi: ExtensionAPI) {
 	// failures keep their attachment — nothing is ever lost. The model routes
 	// itself: it calls look on the path only if it wants the content.
 	pi.on("input", async (event, ctx) => {
-		if (!cfg.takeover || event.source === "extension" || modelHasVision(ctx.model ?? currentModel)) return;
+		if (!cfg.takeover || event.source === "extension" || !modelIsTextOnly(ctx.model ?? currentModel)) return;
 		const images = event.images ?? [];
 		if (images.length === 0) return;
 		const lines: string[] = [];
@@ -444,7 +467,7 @@ export default function (pi: ExtensionAPI) {
 		for (const img of images) {
 			try {
 				const p = path.join(os.tmpdir(), `pi-look-${crypto.randomUUID()}.${imageExtForMime(img.mimeType)}`);
-				fs.writeFileSync(p, Buffer.from(img.data, "base64"));
+				fs.writeFileSync(p, Buffer.from(img.data, "base64"), { flag: "wx", mode: 0o600 });
 				lines.push(`[image: ${p}]`);
 			} catch {
 				kept.push(img);
@@ -462,7 +485,7 @@ export default function (pi: ExtensionAPI) {
 	// the original result through; the omission note is never traded for an error.
 	pi.on("tool_result", async (event, ctx) => {
 		if (!cfg.takeover || event.toolName !== "read" || event.parentToolCallId) return;
-		if (modelHasVision(ctx.model ?? currentModel)) return; // ctx.model is authoritative at hook time
+		if (!modelIsTextOnly(ctx.model ?? currentModel)) return;
 		if (!Array.isArray(event.content) || !event.content.some((c) => c?.type === "image")) return;
 		const raw = typeof event.input?.["path"] === "string" ? String(event.input["path"]) : "";
 		if (!raw) return;
@@ -471,7 +494,8 @@ export default function (pi: ExtensionAPI) {
 		let a: Analysis;
 		try { a = await analyzeCached(cfg, img); } catch { return; }
 		const note = event.content.find((c) => c.type === "text");
-		return { content: [{ type: "text", text: mergeReadTakeover(note && "text" in note ? note.text : "", fmtAnalysis(a, cfg)) }] };
+		const text = mergeReadTakeover(note && "text" in note ? note.text : "", fmtAnalysis(a, cfg));
+		return { content: [{ type: "text", text }], structuredContent: text };
 	});
 
 	pi.registerTool({
@@ -493,11 +517,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(toolCallId: string, args, signal?: AbortSignal, onUpdate?: OnUpdate, ctx?: ExtensionContext) {
 			if (!args?.path) return { content: [{ type: "text", text: `path required` }], isError: true, details: undefined };
-			const img = expand(String(args.path));
+			const img = path.resolve(ctx?.cwd ?? process.cwd(), expand(String(args.path)));
 			if (!fs.existsSync(img)) return { content: [{ type: "text", text: `file not found: ${args.path}` }], isError: true, details: undefined };
 			const model = ctx?.model ?? currentModel;
 			const hasVision = modelHasVision(model);
-			const canRelay = Array.isArray(model?.input) && model.input.includes("text") && !hasVision;
+			const canRelay = modelIsTextOnly(model);
 			const requestedMode = ["auto", "stats", "ocr", "vlm"].includes(String(args.mode)) ? String(args.mode) : "auto";
 			const mode = requestedMode === "vlm" && !canRelay ? "ocr" : requestedMode;
 			// footer progress chip (pi-taskwatcher convention) — only when a host

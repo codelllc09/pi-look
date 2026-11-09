@@ -43,6 +43,7 @@ assert.equal(r.text, `check this [image: ${CLIP}] please`);
 assert.equal(r.images.length, 1);
 assert.equal(r.images[0].mimeType, "image/png");
 assert.equal(r.images[0].data, Buffer.from("x").toString("base64"));
+assert.equal(upgradePastePaths(CLIP, `${TMP}/`, ok).text, `[image: ${CLIP}]`);
 
 // Both artifact prefixes, dedup of repeated mentions, jpg→image/jpeg.
 r = upgradePastePaths(`${LOOK} and ${CLIP} and ${LOOK}`, TMP, ok);
@@ -110,6 +111,9 @@ try {
 	const vision = await hooks.input(input, { model: { input: ["text", "image"] } });
 	assert.equal(vision.text, `Check [image: ${first}]`);
 	assert.deepEqual(vision.images, [{ type: "image", mimeType: "image/png", data: Buffer.from("image bytes").toString("base64") }]);
+	const alreadyAttached = await hooks.input({ ...input, images: vision.images }, { model: { input: ["text", "image"] } });
+	assert.equal(alreadyAttached.text, vision.text);
+	assert.deepEqual(alreadyAttached.images, vision.images);
 } finally {
 	rmSync(first);
 }
