@@ -3,3 +3,5 @@ look.test.bundle.mjs
 look.takeover.bundle.mjs
 paste.test.bundle.mjs
 AGENTS.md
+__pycache__/
+*.pyc

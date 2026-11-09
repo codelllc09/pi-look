@@ -22,15 +22,38 @@ import json
 import sys
 
 try:
+    import numpy as np
     from PIL import Image
-except ImportError:
+except ImportError as e:
     print(
-        "pi-look analyzer deps missing. Install for this interpreter, e.g.:\n"
-        "  uv pip install pillow rapidocr\n"
-        "  pip install pillow rapidocr",
+        f"pi-look analyzer deps missing ({e}). Install for this interpreter, e.g.:\n"
+        "  uv pip install -r scripts/requirements.txt",
         file=sys.stderr,
     )
     sys.exit(3)
+
+
+def _otsu(gray: "np.ndarray") -> tuple[int, bool]:
+    """Otsu threshold (t, valid). valid=False on unimodal images (no split
+    reduces within-class variance) — callers must treat ink as empty."""
+    hist = np.bincount(gray.ravel(), minlength=256).astype(np.float64)
+    total = float(gray.size)
+    sum_all = float((np.arange(256) * hist).sum())
+    w_b = 0.0
+    sum_b = 0.0
+    best_t, best_var = 0, -1.0
+    for t in range(256):
+        w_b += hist[t]
+        if w_b == 0:
+            continue
+        w_f = total - w_b
+        if w_f == 0:
+            break
+        sum_b += t * hist[t]
+        var_between = w_b * w_f * (sum_b / w_b - (sum_all - sum_b) / w_f) ** 2
+        if var_between > best_var:
+            best_var, best_t = var_between, t
+    return best_t, best_var > 0
 
 
 def lane0(img: Image.Image) -> dict:
@@ -49,21 +72,20 @@ def lane0(img: Image.Image) -> dict:
             dom.append({"hex": f"#{r:02x}{g:02x}{b:02x}", "share": round(cnt / (small.size[0] * small.size[1]), 3)})
     # Text-row estimate: horizontal projection of "ink" (dark on light or
     # light on dark) density, then count row-bands above a threshold.
-    gray = rgb.convert("L").resize((min(w, 480), min(h, 480)))
-    px = list(gray.getdata()) if not hasattr(gray, "get_flattened_data") else list(gray.get_flattened_data())
-    gw, gh = gray.size
-    dark_bg = sum(px) / len(px) < 128
-    row_ink = []
-    for y in range(gh):
-        ink = 0
-        for x in range(gw):
-            v = px[y * gw + x]
-            if (dark_bg and v > 150) or (not dark_bg and v < 70):
-                ink += 1
-        row_ink.append(ink / gw)
+    # Vectorized numpy; ink cut at the Otsu threshold (adaptive, replaces the
+    # old fixed 150/70 cuts that broke on low-contrast antialiasing).
+    gray_img = rgb.convert("L").resize((min(w, 480), min(h, 480)))
+    gray = np.asarray(gray_img, dtype=np.uint8)
+    dark_bg = bool(gray.mean() < 128)
+    t, valid = _otsu(gray)
+    if not valid:
+        ink_rows = np.zeros(gray.shape[0])
+    else:
+        mask = gray > t if dark_bg else gray < t
+        ink_rows = mask.mean(axis=1)
     bands_raw = []
     inside = False
-    for y, v in enumerate(row_ink):
+    for y, v in enumerate(ink_rows):
         if v > 0.02 and not inside:
             bands_raw.append([y, y])
             inside = True

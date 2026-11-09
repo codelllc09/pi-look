@@ -9,6 +9,7 @@
 # Non-default tiers (v6-medium / v5-* / v4-mobile) download on first use.
 pillow>=13,<14
 rapidocr>=3.10,<4
+numpy>=2
 onnxruntime>=1.31,<2
 
 # Guaranteed-present (not imported by analyze.py): the model's bash-domain CV
