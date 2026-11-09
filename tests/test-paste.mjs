@@ -50,15 +50,17 @@ assert.equal(r.text, `[image: ${CLIP}]. /var${CLIP} ${CLIP}.bak`);
 
 const hooks = {};
 let transform;
+const entries = [];
 registerPaste({
 	on(name, handler) { hooks[name] = handler; },
 	registerMarkdownTransformer(fn) { transform = fn; },
+	appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
 });
 const first = join(tmpdir(), `pi-clipboard-${randomUUID()}.png`);
 const second = join(tmpdir(), `pi-look-${randomUUID()}.jpg`);
 const historic = { role: "user", content: first };
 const live = { role: "user", content: [{ type: "text", text: `See [image: ${second}] and ${first}` }] };
-const entries = [{ type: "message", message: historic }];
+entries.push({ type: "message", message: historic });
 const ctx = { mode: "tui", sessionManager: { getEntries: () => entries } };
 const user = { messageType: "user" };
 await hooks.session_start({}, ctx);
@@ -92,5 +94,61 @@ try {
 } finally {
 	rmSync(first);
 }
+
+// The host creates the editor, installs onSubmit, and then restores the draft.
+const draftHooks = {};
+const draftEntries = [];
+let factory;
+let composed = 0;
+let submitted;
+const previous = () => {
+	composed++;
+	return {
+		text: "",
+		getText() { return this.text; },
+		setText(text) { this.text = text; },
+		insertTextAtCursor(text) { this.text += text; },
+	};
+};
+registerPaste({
+	on(name, handler) { draftHooks[name] = handler; },
+	registerMarkdownTransformer() {},
+	appendEntry(customType, data) { draftEntries.push({ type: "custom", customType, data }); },
+});
+const draftCtx = {
+	mode: "tui",
+	sessionManager: { getEntries: () => draftEntries },
+	ui: {
+		getEditorComponent: () => previous,
+		setEditorComponent(next) { factory = next; },
+	},
+};
+const openDraft = async (text) => {
+	await draftHooks.session_start({}, draftCtx);
+	const editor = factory();
+	editor.onSubmit = (value) => { submitted = value; };
+	editor.setText(text);
+	return editor;
+};
+let draft = await openDraft(`See ${first}`);
+assert.equal(draft.getText(), "See [fig1]");
+draft.insertTextAtCursor(" ");
+draft.insertTextAtCursor(second);
+assert.equal(draft.getText(), "See [fig1] [fig2]");
+assert.equal(draftEntries.length, 2);
+
+// Deleting the first paste and reloading preserves the second number and path.
+draft = await openDraft("See [fig2]");
+assert.equal(composed, 2);
+assert.equal(draft.getText(), "See [fig2]");
+assert.deepEqual(await draftHooks.input({ source: "interactive", text: draft.getText() }, { model: { input: ["text"] } }),
+	{ action: "transform", text: `See [image: ${second}]` });
+assert.equal(await draftHooks.input({ source: "interactive", text: "[fig99]" }, {}), undefined);
+assert.equal(await draftHooks.input({ source: "extension", text: "[fig2]" }, {}), undefined);
+draft.onSubmit("! cat [fig2]");
+assert.equal(submitted, `! cat ${second}`);
+draft.setText("! cat ");
+draft.insertTextAtCursor(second);
+assert.equal(draft.getText(), `! cat ${second}`);
 
 console.log("test-paste: attachment and figure link assertions passed");

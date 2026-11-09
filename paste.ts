@@ -7,13 +7,13 @@
  * look(path) themselves, guided by the look tool's prompt guidelines.
  *
  * For vision models, attach the image and keep the path for look().
- * The user transcript renders known paths as [figN] with a native file link
- * when supported. The original message remains available to the model.
+ * The editor shows [figN] on paste and the input hook resolves it to a path.
+ * The user transcript uses the same label with a native file link.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCapabilities, hyperlink } from "@earendil-works/pi-tui";
 
 interface ImageContent {
@@ -21,6 +21,9 @@ interface ImageContent {
 	data: string; // base64
 	mimeType: string;
 }
+
+const FIGURE_ENTRY = "pi-look-figure";
+const FIGURE_LABEL = /\[fig([1-9]\d*)\]/g;
 
 const MIME_BY_EXT: Record<string, string> = {
 	png: "image/png",
@@ -40,6 +43,11 @@ function pasteReferences(tmp: string): RegExp {
 
 function findPastePaths(text: string, references: RegExp): Set<string> {
 	return new Set(Array.from(text.matchAll(references), ([, wrapped, bare]) => wrapped ?? bare));
+}
+
+function isCommandDraft(text: string): boolean {
+	const start = text.trimStart();
+	return start.startsWith("!") || /^\/[\w:-]+(?:\s|$)/.test(start);
 }
 
 /**
@@ -73,26 +81,83 @@ export function upgradePastePaths(
 
 export default function (pi: ExtensionAPI) {
 	const tmp = os.tmpdir();
-	if (typeof pi.registerMarkdownTransformer === "function") {
-		const references = pasteReferences(tmp);
-		const figures = new Map<string, number>();
-		const remember = (content: string | (ImageContent | { type: "text"; text: string })[]) => {
-			const text = typeof content === "string" ? content : content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
-			for (const path of findPastePaths(text, references)) {
-				if (!figures.has(path)) figures.set(path, figures.size + 1);
+	const references = pasteReferences(tmp);
+	const figures = new Map<string, number>();
+	const paths: string[] = [];
+	const remember = (path: string): number => {
+		const known = figures.get(path);
+		if (known !== undefined) return known;
+		const number = paths.push(path);
+		figures.set(path, number);
+		return number;
+	};
+	const save = (path: string): number | undefined => {
+		if (!figures.has(path)) {
+			try {
+				pi.appendEntry(FIGURE_ENTRY, path);
+			} catch {
+				return undefined;
 			}
-		};
-		// Read the append order across the whole session, including other
-		// branches, so revisiting a branch or reloading doesn't renumber it.
+		}
+		return remember(path);
+	};
+	const rememberMessage = (content: string | (ImageContent | { type: "text"; text: string })[], record: (path: string) => void) => {
+		const text = typeof content === "string" ? content : content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+		for (const path of findPastePaths(text, references)) record(path);
+	};
+	const shortenDraft = (text: string) => text.replace(references, (reference, wrapped, bare) => {
+		const number = save(wrapped ?? bare);
+		return number === undefined ? reference : `[fig${number}]`;
+	});
+	const expandFigures = (text: string, format: (path: string) => string) => text.replace(FIGURE_LABEL, (label, number) => {
+		const path = paths[Number(number) - 1];
+		return path === undefined ? label : format(path);
+	});
+
+	if (typeof pi.registerMarkdownTransformer === "function") {
 		pi.on("session_start", (_event, ctx) => {
 			figures.clear();
+			paths.length = 0;
 			if (ctx.mode !== "tui") return;
+			// Replay in session order, including draft aliases and other branches.
 			for (const entry of ctx.sessionManager.getEntries()) {
-				if (entry.type === "message" && entry.message.role === "user") remember(entry.message.content);
+				if (entry.type === "custom" && entry.customType === FIGURE_ENTRY && typeof entry.data === "string" &&
+					findPastePaths(entry.data, references).has(entry.data)) {
+					remember(entry.data);
+				} else if (entry.type === "message" && entry.message.role === "user") {
+					rememberMessage(entry.message.content, remember);
+				}
 			}
+			if (!ctx.ui?.setEditorComponent) return;
+			const previous = ctx.ui.getEditorComponent?.();
+			ctx.ui.setEditorComponent((tui, theme, keybindings) => {
+				const editor = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
+				const insert = editor.insertTextAtCursor?.bind(editor);
+				if (insert) {
+					editor.insertTextAtCursor = (text) => {
+						const image = findPastePaths(text, references).has(text);
+						insert(image && !isCommandDraft(editor.getText()) ? shortenDraft(text) : text);
+					};
+				}
+				const setText = editor.setText.bind(editor);
+				let submitWired = false;
+				editor.setText = (text) => {
+					// Pi installs onSubmit before handing the editor its draft.
+					// Commands bypass input hooks, so restore bare paths there.
+					const submit = editor.onSubmit?.bind(editor);
+					if (!submitWired && submit) {
+						editor.onSubmit = (value) => submit(isCommandDraft(value) ? expandFigures(value, (path) => path) : value);
+						submitWired = true;
+					}
+					setText(isCommandDraft(text) ? text : shortenDraft(text));
+				};
+				return editor;
+			});
 		});
 		pi.on("message_start", (event, ctx) => {
-			if (ctx.mode === "tui" && event.message.role === "user") remember(event.message.content);
+			if (ctx.mode === "tui" && event.message.role === "user") {
+				rememberMessage(event.message.content, (path) => save(path) ?? remember(path));
+			}
 		});
 		pi.registerMarkdownTransformer((markdown, { messageType }) => {
 			if (messageType !== "user" || !figures.size) return markdown;
@@ -112,16 +177,18 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension") return;
+		const text = event.source === "interactive" ? expandFigures(event.text, (path) => `[image: ${path}]`) : event.text;
+		const expanded = text === event.text ? undefined : { action: "transform" as const, text };
 		const m = ctx.model;
-		if (!m || !Array.isArray(m.input) || !m.input.includes("image")) return; // text-only: path protocol, model routes via look
-		const upgraded = upgradePastePaths(event.text, tmp, (p) => {
+		if (!m || !Array.isArray(m.input) || !m.input.includes("image")) return expanded;
+		const upgraded = upgradePastePaths(text, tmp, (p) => {
 			try {
 				return fs.readFileSync(p);
 			} catch {
 				return null;
 			}
 		});
-		if (!upgraded) return;
+		if (!upgraded) return expanded;
 		const images: ImageContent[] = [...(event.images ?? []), ...upgraded.images.map((i) => ({ type: "image" as const, ...i }))];
 		return { action: "transform", text: upgraded.text, images };
 	});

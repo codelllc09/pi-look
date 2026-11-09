@@ -61,11 +61,9 @@ pre-analysis:
 
 ## Native paste (replaces third-party paste extensions)
 
-pi's own `Ctrl+V` writes pasted clipboard images to
-`/tmp/pi-clipboard-<uuid>.<ext>` and inserts the path into the prompt —
-exactly the path protocol text-only models need (they call `look`
-themselves). The bundled `paste.ts` extension completes the picture for
-vision models:
+Pi's own `Ctrl+V` writes pasted clipboard images to
+`/tmp/pi-clipboard-<uuid>.<ext>`. The editor shows `[fig1]`, `[fig2]`, and
+so on immediately. On submit, `paste.ts` resolves the labels to image paths:
 
 - **vision model**: paste artifacts (`/tmp/pi-clipboard-*`, `/tmp/pi-look-*`)
   found in the input are upgraded to real image attachments; the path text
@@ -74,11 +72,11 @@ vision models:
 - **text-only model**: the path lets the model call `look` or use the
   read takeover.
 
-The interactive transcript renders pasted paths as session-scoped
-`[fig1]`, `[fig2]`, and so on. With terminal hyperlinks enabled, click a
-figure in Pi fullscreen to open its file in the system viewer. In regular
-mode the terminal handles the click. Terminals without hyperlinks show
-plain short labels. Previews use Pi's temporary image files.
+The interactive transcript keeps the same session-scoped labels. With
+terminal hyperlinks enabled, click a figure in Pi fullscreen to open its
+file in the system viewer. In regular mode the terminal handles the click.
+Terminals without hyperlinks show plain short labels. Opening a figure
+uses Pi's temporary image file.
 
 No chips, no cards, no rejection. If a third-party paste extension (e.g.
 pi-image-paste-cards) is installed, remove it — it rejects sends for text-only
