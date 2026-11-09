@@ -13,7 +13,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
-import { CustomEditor, resizeImage, type ExtensionAPI, type ResizedImage } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, UserMessageComponent, resizeImage, type ExtensionAPI, type ResizedImage } from "@earendil-works/pi-coding-agent";
 import {
 	Container, Image, Text, getCapabilities, getCellDimensions, getImageDimensions, getOsc8LinkAtColumn, hyperlink,
 	matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, type Component, type EditorComponent,
@@ -75,6 +75,120 @@ async function readFigure(path: string, options: Parameters<typeof resizeImage>[
 	const size = getImageDimensions(bytes.toString("base64"), mime);
 	if (!size || size.widthPx * size.heightPx > 16_000_000) return null;
 	return resizeImage(bytes, mime, options);
+}
+
+function figureLink(number: number, path: string): string {
+	const label = `[fig${number}]`;
+	if (!getCapabilities().hyperlinks) return label;
+	// BEL survives Markdown's backslash handling, including paths in code spans.
+	return hyperlink(`\x1b[4m${label}\x1b[24m`, pathToFileURL(path).href).replaceAll("\x1b\\", "\x07");
+}
+
+type CaptureMessageFigures = (render: () => string[], capture: (numbers: number[]) => void) => string[];
+
+function attachTranscriptChips(
+	tui: TUI, paths: readonly string[], showImages: () => boolean, captureFigures: CaptureMessageFigures,
+): (() => void) | undefined {
+	const document = tui?.children?.[0];
+	// Pi mounts the chat container after its header and resource list.
+	const chat = document instanceof Container ? document.children.at(-1) : undefined;
+	if (!(chat instanceof Container)) return;
+	const screen = tui as Partial<TuiAltScreen>;
+	const supportsImages = () => tui.mode === "fullscreen" && getCapabilities().images === "kitty" &&
+		typeof screen.getScreenLines === "function" && showImages();
+	const thumbnails = new Map<number, ResizedImage | null>();
+	const decorated = new WeakMap<UserMessageComponent, () => void>();
+	let active = true;
+	let busy = false;
+	const schedule = () => {
+		if (!active || busy || !supportsImages()) return;
+		busy = true;
+		// The fullscreen renderer lays out all messages. Read only chips visible in the finished frame.
+		queueMicrotask(async () => {
+			try {
+				if (!active || !supportsImages()) return;
+				const visible = new Set<number>();
+				for (const line of screen.getScreenLines?.() ?? []) {
+					if (!line.includes("▧")) continue;
+					const caption = line.split("\x1b_G", 1)[0];
+					const match = /^\s*▧ \[fig([1-9]\d*)\]/.exec(stripTerminalSequences(caption));
+					if (match) visible.add(Number(match[1]));
+				}
+				const number = [...visible].find((id) => paths[id - 1] && !thumbnails.has(id));
+				if (number === undefined) return;
+				if (thumbnails.size >= 64) {
+					const oldestOffscreen = [...thumbnails.keys()].find((id) => !visible.has(id));
+					if (oldestOffscreen === undefined) return;
+					thumbnails.delete(oldestOffscreen);
+				}
+				const image = await readFigure(paths[number - 1], { maxWidth: 128, maxHeight: 96, maxBytes: 32 * 1024 })
+					.catch(() => null);
+				if (active) {
+					thumbnails.set(number, image);
+					tui.requestRender();
+				}
+			} finally {
+				busy = false;
+			}
+		});
+	};
+	const decorate = (message: Component) => {
+		if (!(message instanceof UserMessageComponent) || decorated.has(message)) return;
+		let numbers: number[] = [];
+		const images = new Map<number, { data: ResizedImage; component: Image }>();
+		const footer: Component = {
+			invalidate() {
+				for (const { component } of images.values()) component.invalidate();
+			},
+			render(width) {
+				if (numbers.length) schedule();
+				return numbers.map((number) => {
+					const label = `  ▧ ${figureLink(number, paths[number - 1])}`;
+					const available = width - visibleWidth(label) - 2;
+					const data = thumbnails.get(number);
+					if (!data) images.delete(number);
+					if (!data || available < 3 || !supportsImages()) {
+						return truncateToWidth(label, width);
+					}
+					let image = images.get(number);
+					if (image?.data !== data) {
+						image = { data, component: new Image(data.data, data.mimeType, { fallbackColor: (text) => text }, {
+							maxWidthCells: 8, maxHeightCells: 1,
+						}) };
+						images.set(number, image);
+					}
+					const line = image.component.render(available)[0];
+					return line.startsWith("\x1b_G") ? `${label}  ${line}` : label;
+				});
+			},
+		};
+		const render = message.render;
+		const withFooter = (width: number) => {
+			if (!message.children.includes(footer)) message.addChild(footer);
+			return captureFigures(() => render.call(message, width), (next) => { numbers = next; });
+		};
+		message.render = withFooter;
+		message.invalidate();
+		decorated.set(message, () => {
+			if (message.render === withFooter) message.render = render;
+			message.removeChild(footer);
+		});
+	};
+	const originalAdd = chat.addChild;
+	const add = (component: Component) => {
+		decorate(component);
+		originalAdd.call(chat, component);
+	};
+	chat.addChild = add;
+	for (const child of chat.children) decorate(child);
+	return () => {
+		active = false;
+		if (chat.addChild === add) chat.addChild = originalAdd;
+		for (const child of chat.children) {
+			if (child instanceof UserMessageComponent) decorated.get(child)?.();
+		}
+		thumbnails.clear();
+	};
 }
 
 const ZOOM_LEVELS = [1, 1.25, 1.5, 2, 2.5, 3, 4];
@@ -346,6 +460,7 @@ function attachFigurePreview(
 	editor.handleInput = handleInput;
 	return {
 		dismiss,
+		hasOverlay: () => Boolean(overlay || viewer),
 		dispose: () => {
 			dismiss();
 			closeViewer();
@@ -391,6 +506,16 @@ export default function (pi: ExtensionAPI) {
 	const figures = new Map<string, number>();
 	const paths: string[] = [];
 	let disposePreview: (() => void) | undefined;
+	let captureMessageFigures: ((numbers: number[]) => void) | undefined;
+	const withMessageFigures: CaptureMessageFigures = (render, capture) => {
+		const previous = captureMessageFigures;
+		captureMessageFigures = capture;
+		try {
+			return render();
+		} finally {
+			captureMessageFigures = previous;
+		}
+	};
 	const remember = (path: string): number => {
 		const known = figures.get(path);
 		if (known !== undefined) return known;
@@ -443,8 +568,14 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 				const editor = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
 				disposePreview?.();
-				const preview = attachFigurePreview(editor, tui, paths, () => pi.getSettings?.().terminal?.showImages !== false);
-				disposePreview = preview?.dispose;
+				const showImages = () => pi.getSettings?.().terminal?.showImages !== false;
+				const preview = attachFigurePreview(editor, tui, paths, showImages);
+				// Pi composites over text rows. Let our overlays cover the entire message while open.
+				const detachChips = attachTranscriptChips(tui, paths, () => showImages() && !preview?.hasOverlay(), withMessageFigures);
+				disposePreview = () => {
+					preview?.dispose();
+					detachChips?.();
+				};
 				const insert = editor.insertTextAtCursor?.bind(editor);
 				if (insert) {
 					editor.insertTextAtCursor = (text) => {
@@ -476,17 +607,16 @@ export default function (pi: ExtensionAPI) {
 		});
 		pi.registerMarkdownTransformer((markdown, { messageType }) => {
 			if (messageType !== "user" || !figures.size) return markdown;
-			const links = getCapabilities().hyperlinks;
-			return markdown.replace(references, (reference, wrapped, bare) => {
+			const numbers = captureMessageFigures && new Set<number>();
+			const rendered = markdown.replace(references, (reference, wrapped, bare) => {
 				const path = wrapped ?? bare;
 				const number = figures.get(path);
 				if (number === undefined) return reference;
-				const label = `[fig${number}]`;
-				if (!links) return label;
-				// BEL keeps the OSC 8 terminator intact through Markdown's
-				// backslash handling, including paths inside code spans.
-				return hyperlink(`\x1b[4m${label}\x1b[24m`, pathToFileURL(path).href).replaceAll("\x1b\\", "\x07");
+				numbers?.add(number);
+				return figureLink(number, path);
 			});
+			if (numbers) captureMessageFigures?.([...numbers]);
+			return rendered;
 		});
 	}
 

@@ -6,7 +6,8 @@ import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { getOsc8LinkAtColumn, setCapabilities, setCellDimensions, stripTerminalSequences } from "@earendil-works/pi-tui";
+import { initTheme, UserMessageComponent } from "@earendil-works/pi-coding-agent";
+import { Container, getOsc8LinkAtColumn, setCapabilities, setCellDimensions, stripTerminalSequences } from "@earendil-works/pi-tui";
 
 const bundle = join(import.meta.dirname, "..", "paste.test.bundle.mjs");
 execSync(`npx esbuild ${join(import.meta.dirname, "..", "paste.ts")} --bundle --format=esm --platform=node --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui --outfile=${bundle}`, { stdio: "pipe" });
@@ -99,6 +100,7 @@ try {
 const draftHooks = {};
 const draftEntries = [];
 let factory;
+let draftTransform;
 let composed = 0;
 let submitted;
 const previous = () => {
@@ -112,7 +114,7 @@ const previous = () => {
 };
 registerPaste({
 	on(name, handler) { draftHooks[name] = handler; },
-	registerMarkdownTransformer() {},
+	registerMarkdownTransformer(fn) { draftTransform = fn; },
 	appendEntry(customType, data) { draftEntries.push({ type: "custom", customType, data }); },
 });
 const draftCtx = {
@@ -123,9 +125,9 @@ const draftCtx = {
 		setEditorComponent(next) { factory = next; },
 	},
 };
-const openDraft = async (text) => {
+const openDraft = async (text, tui) => {
 	await draftHooks.session_start({}, draftCtx);
-	const editor = factory();
+	const editor = factory(tui);
 	editor.onSubmit = (value) => { submitted = value; };
 	editor.setText(text);
 	return editor;
@@ -150,6 +152,21 @@ assert.equal(submitted, `! cat ${second}`);
 draft.setText("! cat ");
 draft.insertTextAtCursor(second);
 assert.equal(draft.getText(), `! cat ${second}`);
+
+// The native user component places one chip per referenced figure at the end.
+initTheme("dark");
+const document = new Container();
+const chat = new Container();
+document.addChild(chat);
+await openDraft("", { mode: "regular", children: [document] });
+const message = new UserMessageComponent(`See ${first} again ${first} then ${second}`, undefined, 1, [draftTransform]);
+chat.addChild(message);
+const chipLines = () => message.render(100).map(stripTerminalSequences).filter((line) => line.includes("▧"));
+assert.deepEqual(chipLines(), ["  ▧ [fig1]", "  ▧ [fig2]"]);
+message.setOutputPad(2);
+assert.deepEqual(chipLines(), ["  ▧ [fig1]", "  ▧ [fig2]"]);
+await draftHooks.session_shutdown();
+assert.deepEqual(chipLines(), []);
 
 const renderedDraft = "\x1b[36m看 [fig1] [fig2]\x1b[0m";
 assert.equal(figureLabelAtColumn(renderedDraft, 2), undefined);

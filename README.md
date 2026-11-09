@@ -80,6 +80,9 @@ Without Kitty graphics, Pi fullscreen opens the file in the system viewer.
 In regular mode the terminal handles hyperlinks. Without hyperlinks, the
 transcript shows plain labels.
 
+Sent messages show a one-line chip per figure at the end. In Kitty fullscreen,
+visible chips include a small thumbnail. Other modes show the figure badge.
+
 Hover over a draft label or a sent figure link to preview a thumbnail
 in Kitty fullscreen. Typing, scrolling, or moving away within the same
 area closes it. It also closes after three seconds without a mouse move
