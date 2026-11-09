@@ -110,7 +110,14 @@ function runPython(script: string, args: string[]): Promise<string> {
 }
 
 interface Analysis {
-	stats?: { width: number; height: number; theme: string; dominantColors: { hex: string; share: number }[]; estimatedTextRows: number };
+	stats?: {
+		width: number; height: number; theme: string;
+		dominantColors: { hex: string; share: number }[]; estimatedTextRows: number;
+		bg?: string; ink?: string | null; colorfulness?: string; gray?: boolean;
+		accent?: { hex: string; share: number }[]; columns?: number;
+		rowGap?: number; rowGapRegular?: boolean;
+		grid?: { cols: number; rows: number; cells: string[] };
+	};
 	ocr?: {
 		available: boolean; error?: string; tier?: string;
 		lines: { conf: number; text: string; box?: number[]; cjk?: number }[];
@@ -322,7 +329,20 @@ export async function callVLM(cfg: LookConfig, question: string, imgPath: string
 export function fmtAnalysis(a: Analysis, cfg?: LookConfig): string {
 	const s = a.stats, o = a.ocr;
 	const parts: string[] = [];
-	if (s) parts.push(`[stats] ${s.width}x${s.height} ${s.theme}-theme rows≈${s.estimatedTextRows} colors=${s.dominantColors.map((c) => `${c.hex}(${Math.round(c.share * 100)}%)`).join(" ")}`);
+	if (s) {
+		parts.push(`[stats] ${s.width}x${s.height} ${s.theme}-theme rows≈${s.estimatedTextRows} colors=${s.dominantColors.map((c) => `${c.hex}(${Math.round(c.share * 100)}%)`).join(" ")}`);
+		// Structure lane (batch 4): objective pixel facts, appended below the stable header line.
+		const st: string[] = [];
+		if (s.bg) st.push(`bg=${s.bg}`);
+		if (s.ink) st.push(`ink=${s.ink}`);
+		if (s.colorfulness) st.push(`colorfulness=${s.colorfulness}`);
+		if (s.gray) st.push("grayscale");
+		for (const a of s.accent ?? []) st.push(`accent=${a.hex}(${Math.round(a.share * 100)}%)`);
+		if (s.columns && s.columns > 1) st.push(`cols=${s.columns}`);
+		if (s.rowGap && s.rowGapRegular) st.push(`rowGap≈${s.rowGap}px(regular)`);
+		if (st.length) parts.push(`[structure] ${st.join(" ")}`);
+		if (s.grid && s.grid.cells.length) parts.push(`[grid ${s.grid.cols}x${s.grid.rows}]\n${s.grid.cells.join("\n")}`);
+	}
 	if (!o) return parts.join("\n");
 	if (!o.available) parts.push(`[ocr] unavailable: ${o.error}`);
 	else {

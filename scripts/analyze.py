@@ -56,6 +56,112 @@ def _otsu(gray: "np.ndarray") -> tuple[int, bool]:
     return best_t, best_var > 0
 
 
+def _hex(c) -> str:
+    r, g, b = (int(max(0, min(255, round(float(v))))) for v in c)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _structure(rgb480: "np.ndarray", mask: "np.ndarray", valid: bool, bands_raw: list, gh: int, h: int, small: Image.Image, dom: list) -> dict:
+    """Objective structure facts derived from pixels: bg/ink separation,
+    colorfulness, grayscale, accent colors, column bands, row-gap regularity,
+    and a density/hue grid thumbnail. Never interprets."""
+    out: dict = {}
+    f = rgb480.astype(np.float32)
+    if valid and mask.any():
+        out["bg"] = _hex(f[~mask].mean(axis=0))
+        out["ink"] = _hex(f[mask].mean(axis=0))
+    else:
+        out["bg"] = _hex(f.mean(axis=(0, 1)))
+        out["ink"] = None
+
+    rg = f[..., 0] - f[..., 1]
+    yb = 0.5 * (f[..., 0] + f[..., 1]) - f[..., 2]
+    cf = float(np.sqrt(rg.std() ** 2 + yb.std() ** 2) + 0.3 * np.sqrt(rg.mean() ** 2 + yb.mean() ** 2))
+    out["colorfulness"] = "low" if cf < 15 else "medium" if cf < 45 else "high"
+    spread = f.max(axis=2) - f.min(axis=2)
+    out["gray"] = bool(np.percentile(spread, 95) < 8)
+
+    # Accent: saturated, small-share palette colors (12-color quantize).
+    try:
+        q12 = small.quantize(colors=12)
+        pal = q12.getpalette() or []
+        for cnt, idx in sorted(q12.getcolors() or [], reverse=True):
+            base = idx * 3
+            if base + 2 >= len(pal) or len(out.get("accent", [])) >= 2:
+                break
+            r, g, b = float(pal[base]), float(pal[base + 1]), float(pal[base + 2])
+            mx, mn = max(r, g, b), min(r, g, b)
+            share = cnt / (small.size[0] * small.size[1])
+            if mx <= 0 or (mx - mn) / mx < 0.35 or not (0.005 <= share <= 0.15):
+                continue
+            out.setdefault("accent", []).append({"hex": f"#{int(r):02x}{int(g):02x}{int(b):02x}", "share": round(share, 3)})
+    except Exception:
+        pass
+
+    # Column bands: vertical projection of the ink mask (works without OCR).
+    # Per-character fragmentation at 480px needs a gap-merge first (same ≤4
+    # rule as row bands), then drop bands narrower than 5% of the width.
+    col_ink = mask.mean(axis=0) if valid else np.zeros(mask.shape[1])
+    xraw = []
+    inside = False
+    for x, v in enumerate(col_ink):
+        if v > 0.02 and not inside:
+            xraw.append([x, x])
+            inside = True
+        elif v > 0.02:
+            xraw[-1][1] = x
+        else:
+            inside = False
+    xbands = []
+    for start, end in xraw:
+        if xbands and start - xbands[-1][1] <= 4:
+            xbands[-1][1] = end
+        else:
+            xbands.append([start, end])
+    xbands = [b for b in xbands if (b[1] - b[0]) >= 0.05 * mask.shape[1]]
+    out["columns"] = min(len(xbands), 5) if len(xbands) >= 2 else 1
+
+    # Row-gap regularity (display scale = original px).
+    if len(bands_raw) >= 3:
+        starts = [b[0] for b in bands_raw]
+        gaps = np.diff(starts)
+        if float(gaps.mean()) > 0:
+            out["rowGap"] = int(round(float(np.median(gaps)) * h / gh))
+            out["rowGapRegular"] = bool(float(gaps.std() / gaps.mean()) < 0.15)
+
+    # Grid thumbnail: density chars, hue letters for strongly colored cells.
+    gw, ghh = mask.shape[1], mask.shape[0]
+    cn, rn = min(8, max(1, gw // 40)), min(6, max(1, ghh // 40))
+    rows = []
+    for r in range(rn):
+        s = ""
+        for c in range(cn):
+            cell = mask[r * ghh // rn : (r + 1) * ghh // rn, c * gw // cn : (c + 1) * gw // cn]
+            d = float(cell.mean()) if cell.size else 0.0
+            mean_rgb = f[r * ghh // rn : (r + 1) * ghh // rn, c * gw // cn : (c + 1) * gw // cn].mean(axis=(0, 1))
+            mx, mn = float(mean_rgb.max()), float(mean_rgb.min())
+            if mx > 0 and (mx - mn) / mx > 0.30 and d >= 0.02:
+                hi = [i for i, v in enumerate(mean_rgb) if v == mx]
+                if mean_rgb[0] == mx and mean_rgb[1] == mx:
+                    ch = "Y"
+                elif mean_rgb[2] == mx and mean_rgb[1] == mx:
+                    ch = "C"
+                elif mean_rgb[0] == mx and mean_rgb[2] == mx:
+                    ch = "M"
+                elif mean_rgb[0] == mx:
+                    ch = "R"
+                elif mean_rgb[1] == mx:
+                    ch = "G"
+                else:
+                    ch = "B"
+                s += ch
+            else:
+                s += "·" if d < 0.05 else "░" if d < 0.2 else "▒" if d < 0.5 else "▓" if d < 0.8 else "█"
+        rows.append(s)
+    out["grid"] = {"cols": cn, "rows": rn, "cells": rows}
+    return out
+
+
 def lane0(img: Image.Image) -> dict:
     rgb = img.convert("RGB")
     w, h = rgb.size
@@ -80,8 +186,11 @@ def lane0(img: Image.Image) -> dict:
     t, valid = _otsu(gray)
     if not valid:
         ink_rows = np.zeros(gray.shape[0])
+        mask = np.zeros(gray.shape, dtype=bool)
     else:
-        mask = gray > t if dark_bg else gray < t
+        # `<=` on light bg: Otsu's t can sit exactly on the dark mode's bin
+        # (variance plateau), and a strict `<` would drop the whole mode.
+        mask = gray > t if dark_bg else gray <= t
         ink_rows = mask.mean(axis=1)
     bands_raw = []
     inside = False
@@ -108,6 +217,12 @@ def lane0(img: Image.Image) -> dict:
         "theme": "dark" if dark_bg else "light",
         "dominantColors": dom,
         "estimatedTextRows": bands,
+        **{
+            k: v
+            for k, v in _structure(
+                np.asarray(rgb.resize(gray_img.size)), mask, valid, bands_raw, gray.shape[0], h, small, dom
+            ).items()
+        },
     }
 
 

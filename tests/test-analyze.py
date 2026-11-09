@@ -128,6 +128,8 @@ class AnalyzerTests(unittest.TestCase):
             o = r["ocr"]
             self.assertEqual(o["columns"], 2)
             self.assertEqual(len(o["lines"]), 6)
+            # pixel-projection columns agree with the box-based ones
+            self.assertEqual(r["stats"]["columns"], 2)
             # column-major: the first three lines are the left column
             self.assertTrue(all("左栏" in l["text"] for l in o["lines"][:3]), o["text"])
             self.assertTrue(all("右栏" in l["text"] for l in o["lines"][3:]), o["text"])
@@ -165,6 +167,31 @@ class AnalyzerTests(unittest.TestCase):
             zh = next(l for l in o["lines"] if "中文" in l["text"])
             self.assertLess(en["cjk"], 0.1)
             self.assertGreater(zh["cjk"], 0.9)
+
+    def test_structure_color_and_gray(self):
+        with tempfile.TemporaryDirectory() as td:
+            # gray text image: grayscale, low colorfulness, grid present, ink separable
+            p = f"{td}/gray.png"
+            make_text_image(p, ["灰度文本行"])
+            s = analyze(p)["stats"]
+            self.assertTrue(s["gray"])
+            self.assertEqual(s["colorfulness"], "low")
+            self.assertIn("cells", s["grid"])
+            self.assertTrue(any(ch in "░▒▓█" for row in s["grid"]["cells"] for ch in row))
+            self.assertNotIn("accent", s)
+            self.assertTrue(s["ink"], "ink must resolve on a text image")
+            # saturated red block on gray bg: accent fires, colorful, not gray
+            p2 = f"{td}/red.png"
+            img = Image.new("RGB", (400, 300), (200, 200, 200))
+            d = ImageDraw.Draw(img)
+            d.rectangle([40, 40, 360, 260], fill=(220, 30, 30))
+            img.save(p2)
+            s2 = analyze(p2)["stats"]
+            self.assertFalse(s2["gray"])
+            self.assertIn(s2["colorfulness"], ("medium", "high"))
+            self.assertTrue(any(a["hex"] not in ("#c8c8c8",) for a in s2.get("accent", [])), s2.get("accent"))
+            # a hue letter must appear in the grid for the red block
+            self.assertTrue(any("R" in row for row in s2["grid"]["cells"]), s2["grid"]["cells"])
 
 
 if __name__ == "__main__":
