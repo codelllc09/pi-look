@@ -71,8 +71,14 @@ vision models:
   found in the input are upgraded to real image attachments; the path text
   stays as `[image: <path>]` so the model can still call `look` for the exact
   numbers eyes estimate poorly.
-- **text-only model**: untouched — the path protocol plus the takeover
-  surfaces above own that flow end to end.
+- **text-only model**: the path lets the model call `look` or use the
+  read takeover.
+
+The interactive transcript renders pasted paths as session-scoped
+`[fig1]`, `[fig2]`, and so on. With terminal hyperlinks enabled, click a
+figure in Pi fullscreen to open its file in the system viewer. In regular
+mode the terminal handles the click. Terminals without hyperlinks show
+plain short labels. Previews use Pi's temporary image files.
 
 No chips, no cards, no rejection. If a third-party paste extension (e.g.
 pi-image-paste-cards) is installed, remove it — it rejects sends for text-only

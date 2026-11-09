@@ -6,17 +6,15 @@
  * That path protocol is exactly right for text-only models — they call
  * look(path) themselves, guided by the look tool's prompt guidelines.
  *
- * This extension's single job: for vision models, upgrade those paste paths
- * to real attachments so the model sees the pixels directly. The path text
- * stays in the message (wrapped as "[image: <path>]") so even a vision model
- * can still call look for the exact numbers eyes estimate poorly.
- *
- * Text-only models are never touched here — the path protocol plus look.ts's
- * takeover surfaces own that flow end to end.
+ * For vision models, attach the image and keep the path for look().
+ * The user transcript renders known paths as [figN] with a native file link
+ * when supported. The original message remains available to the model.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { pathToFileURL } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getCapabilities, hyperlink } from "@earendil-works/pi-tui";
 
 interface ImageContent {
 	type: "image";
@@ -33,6 +31,17 @@ const MIME_BY_EXT: Record<string, string> = {
 	bmp: "image/bmp",
 };
 
+function pasteReferences(tmp: string): RegExp {
+	const escaped = tmp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	// Keep an inner /tmp/... or a prefix of a longer filename from matching.
+	const path = `(?<![\\w/])${escaped}/pi-(?:clipboard|look)-[0-9a-f-]{36}\\.(?:png|jpe?g|webp|gif|bmp)(?![\\w/]|\\.\\w)`;
+	return new RegExp(`\\[image: (${path})\\]|(${path})`, "g");
+}
+
+function findPastePaths(text: string, references: RegExp): Set<string> {
+	return new Set(Array.from(text.matchAll(references), ([, wrapped, bare]) => wrapped ?? bare));
+}
+
 /**
  * Pure: find pi paste artifacts (pi-clipboard-* / pi-look-* in tmpdir) in the
  * text, wrap them as "[image: <path>]" (never double-wrapped), and spec the
@@ -45,30 +54,67 @@ export function upgradePastePaths(
 	tmp: string,
 	read: (p: string) => Buffer | null,
 ): { text: string; images: { data: string; mimeType: string }[] } | undefined {
-	const esc = tmp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	// (?<![\w/]) — the tmpdir path must start a path segment, so /var/tmp/...
-	// does not match an inner /tmp/... substring.
-	const re = new RegExp(`(?<![\\w/])${esc}/pi-(?:clipboard|look)-[0-9a-f-]{36}\\.(png|jpe?g|webp|gif|bmp)`, "g");
-	const found = [...new Set(text.match(re) ?? [])];
-	if (!found.length) return undefined;
+	const references = pasteReferences(tmp);
+	const attached = new Set<string>();
 	const images: { data: string; mimeType: string }[] = [];
-	for (const p of found) {
+	for (const p of findPastePaths(text, references)) {
 		const mime = MIME_BY_EXT[p.split(".").pop()?.toLowerCase() ?? ""];
 		const buf = mime ? read(p) : null;
 		if (!buf || !mime) continue;
 		images.push({ data: buf.toString("base64"), mimeType: mime });
-		const escP = p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		text = text.replace(new RegExp(`(?<!\\[image: )${escP}`, "g"), `[image: ${p}]`);
+		attached.add(p);
 	}
-	return images.length ? { text, images } : undefined;
+	if (!images.length) return undefined;
+	text = text.replace(references, (reference, wrapped, bare) =>
+		!wrapped && attached.has(bare) ? `[image: ${bare}]` : reference,
+	);
+	return { text, images };
 }
 
 export default function (pi: ExtensionAPI) {
+	const tmp = os.tmpdir();
+	if (typeof pi.registerMarkdownTransformer === "function") {
+		const references = pasteReferences(tmp);
+		const figures = new Map<string, number>();
+		const remember = (content: string | (ImageContent | { type: "text"; text: string })[]) => {
+			const text = typeof content === "string" ? content : content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+			for (const path of findPastePaths(text, references)) {
+				if (!figures.has(path)) figures.set(path, figures.size + 1);
+			}
+		};
+		// Read the append order across the whole session, including other
+		// branches, so revisiting a branch or reloading doesn't renumber it.
+		pi.on("session_start", (_event, ctx) => {
+			figures.clear();
+			if (ctx.mode !== "tui") return;
+			for (const entry of ctx.sessionManager.getEntries()) {
+				if (entry.type === "message" && entry.message.role === "user") remember(entry.message.content);
+			}
+		});
+		pi.on("message_start", (event, ctx) => {
+			if (ctx.mode === "tui" && event.message.role === "user") remember(event.message.content);
+		});
+		pi.registerMarkdownTransformer((markdown, { messageType }) => {
+			if (messageType !== "user" || !figures.size) return markdown;
+			const links = getCapabilities().hyperlinks;
+			return markdown.replace(references, (reference, wrapped, bare) => {
+				const path = wrapped ?? bare;
+				const number = figures.get(path);
+				if (number === undefined) return reference;
+				const label = `[fig${number}]`;
+				if (!links) return label;
+				// BEL keeps the OSC 8 terminator intact through Markdown's
+				// backslash handling, including paths inside code spans.
+				return hyperlink(`\x1b[4m${label}\x1b[24m`, pathToFileURL(path).href).replaceAll("\x1b\\", "\x07");
+			});
+		});
+	}
+
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension") return;
 		const m = ctx.model;
 		if (!m || !Array.isArray(m.input) || !m.input.includes("image")) return; // text-only: path protocol, model routes via look
-		const upgraded = upgradePastePaths(event.text, os.tmpdir(), (p) => {
+		const upgraded = upgradePastePaths(event.text, tmp, (p) => {
 			try {
 				return fs.readFileSync(p);
 			} catch {
