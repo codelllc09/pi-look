@@ -13,8 +13,11 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
-import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getCapabilities, hyperlink } from "@earendil-works/pi-tui";
+import { CustomEditor, resizeImage, type ExtensionAPI, type ResizedImage } from "@earendil-works/pi-coding-agent";
+import {
+	Container, Image, Text, getCapabilities, getImageDimensions, hyperlink, stripTerminalSequences, visibleWidth,
+	type EditorComponent, type OverlayHandle, type TUI, type TuiAltScreen,
+} from "@earendil-works/pi-tui";
 
 interface ImageContent {
 	type: "image";
@@ -48,6 +51,110 @@ function findPastePaths(text: string, references: RegExp): Set<string> {
 function isCommandDraft(text: string): boolean {
 	const start = text.trimStart();
 	return start.startsWith("!") || /^\/[\w:-]+(?:\s|$)/.test(start);
+}
+
+/** Match against the rendered draft so ANSI styling and wide characters count correctly. */
+export function draftFigureAtColumn(line: string, column: number): { number: number; column: number } | undefined {
+	const text = stripTerminalSequences(line);
+	for (const match of text.matchAll(FIGURE_LABEL)) {
+		const start = visibleWidth(text.slice(0, match.index));
+		if (column >= start && column < start + match[0].length) {
+			return { number: Number(match[1]), column: start };
+		}
+	}
+}
+
+async function readThumbnail(path: string): Promise<ResizedImage | null> {
+	const mime = MIME_BY_EXT[path.split(".").pop() ?? ""];
+	const stat = await fs.promises.stat(path);
+	// Bound encoded input and decoded pixels before starting Pi's resize worker.
+	if (!mime || !stat.isFile() || stat.size > 12 * 1024 * 1024) return null;
+	const bytes = await fs.promises.readFile(path);
+	if (bytes.length > 12 * 1024 * 1024) return null;
+	const size = getImageDimensions(bytes.toString("base64"), mime);
+	if (!size || size.widthPx * size.heightPx > 16_000_000) return null;
+	return resizeImage(bytes, mime, { maxWidth: 384, maxHeight: 240, maxBytes: 256 * 1024 });
+}
+
+function attachDraftPreview(
+	editor: EditorComponent, tui: TUI, paths: readonly string[], showImages: () => boolean,
+): () => void {
+	// getScreenLines is a public API of Pi's fullscreen renderer.
+	const screen = tui as Partial<TuiAltScreen>;
+	if (typeof screen?.getScreenLines !== "function") return () => {};
+	const frame = screen.getScreenLines.bind(screen);
+	const supported = () => tui.mode === "fullscreen" && getCapabilities().images === "kitty";
+	let hovered: { number: number; column: number; row: number; path: string } | undefined;
+	let openTimer: ReturnType<typeof setTimeout> | undefined;
+	let idleTimer: ReturnType<typeof setTimeout> | undefined;
+	let overlay: OverlayHandle | undefined;
+	let cached: { path: string; image: ResizedImage } | undefined;
+	let loading = Promise.resolve();
+
+	const dismiss = () => {
+		hovered = undefined;
+		clearTimeout(openTimer);
+		clearTimeout(idleTimer);
+		overlay?.hide();
+		overlay = undefined;
+	};
+	const show = async (target: NonNullable<typeof hovered>) => {
+		const stillHere = () => hovered === target && supported() && showImages() && !tui.hasOverlay() &&
+			draftFigureAtColumn(frame()[target.row] ?? "", target.column)?.number === target.number;
+		if (!stillHere()) return;
+		const image = cached?.path === target.path ? cached.image : await readThumbnail(target.path);
+		if (!image || !stillHere()) return;
+		cached = { path: target.path, image };
+
+		const { columns, rows } = tui.terminal;
+		const width = Math.min(40, columns);
+		const above = target.row;
+		const below = rows - target.row - 1;
+		const available = Math.max(above, below);
+		if (width < 12 || available < 3) return;
+		const panel = new Container();
+		panel.addChild(new Text(`[fig${target.number}] · ${image.originalWidth}×${image.originalHeight}`, 0, 0));
+		panel.addChild(new Image(image.data, image.mimeType, { fallbackColor: (text) => text }, {
+			maxHeightCells: Math.min(10, available - 1),
+		}));
+		const height = panel.render(width).length;
+		overlay = tui.showOverlay(panel, {
+			width,
+			row: above >= below ? above - height : target.row + 1,
+			col: Math.min(target.column, columns - width),
+			nonCapturing: true,
+			visible: (w, h) => w === columns && h === rows,
+		});
+	};
+	const mouse = editor.handleMouse?.bind(editor);
+	editor.handleMouse = (event) => {
+		const hit = event.type === "move" && supported()
+			? draftFigureAtColumn(frame()[event.screenY] ?? "", event.screenX) : undefined;
+		const path = hit && paths[hit.number - 1];
+		if (!hit || !path) {
+			dismiss();
+		} else {
+			if (hovered?.number !== hit.number || hovered.row !== event.screenY || hovered.column !== hit.column) {
+				dismiss();
+				const target = { ...hit, row: event.screenY, path };
+				hovered = target;
+				openTimer = setTimeout(() => {
+					// Serialize resizes. Stale requests bail out before reading or displaying.
+					loading = loading.then(() => show(target)).catch(() => {});
+				}, 250);
+			}
+			clearTimeout(idleTimer);
+			// Pi dispatches moves inside this editor only. Expire if the pointer goes elsewhere.
+			idleTimer = setTimeout(dismiss, 3_000);
+		}
+		return mouse?.(event);
+	};
+	const input = editor.handleInput.bind(editor);
+	editor.handleInput = (data) => {
+		dismiss();
+		input(data);
+	};
+	return dismiss;
 }
 
 /**
@@ -84,6 +191,7 @@ export default function (pi: ExtensionAPI) {
 	const references = pasteReferences(tmp);
 	const figures = new Map<string, number>();
 	const paths: string[] = [];
+	let dismissPreview = () => {};
 	const remember = (path: string): number => {
 		const known = figures.get(path);
 		if (known !== undefined) return known;
@@ -115,7 +223,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	if (typeof pi.registerMarkdownTransformer === "function") {
+		pi.on("session_shutdown", () => dismissPreview());
 		pi.on("session_start", (_event, ctx) => {
+			dismissPreview();
 			figures.clear();
 			paths.length = 0;
 			if (ctx.mode !== "tui") return;
@@ -132,9 +242,13 @@ export default function (pi: ExtensionAPI) {
 			const previous = ctx.ui.getEditorComponent?.();
 			ctx.ui.setEditorComponent((tui, theme, keybindings) => {
 				const editor = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
+				dismissPreview();
+				const dismiss = attachDraftPreview(editor, tui, paths, () => pi.getSettings?.().terminal?.showImages !== false);
+				dismissPreview = dismiss;
 				const insert = editor.insertTextAtCursor?.bind(editor);
 				if (insert) {
 					editor.insertTextAtCursor = (text) => {
+						dismiss();
 						const image = findPastePaths(text, references).has(text);
 						insert(image && !isCommandDraft(editor.getText()) ? shortenDraft(text) : text);
 					};
@@ -142,6 +256,7 @@ export default function (pi: ExtensionAPI) {
 				const setText = editor.setText.bind(editor);
 				let submitWired = false;
 				editor.setText = (text) => {
+					dismiss();
 					// Pi installs onSubmit before handing the editor its draft.
 					// Commands bypass input hooks, so restore bare paths there.
 					const submit = editor.onSubmit?.bind(editor);
