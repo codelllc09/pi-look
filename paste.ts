@@ -86,8 +86,14 @@ function figureLink(number: number, path: string): string {
 
 type CaptureMessageFigures = (render: () => string[], capture: (numbers: number[]) => void) => string[];
 
+const CHIP_INDENT = 2;
+const CHIP_GAP = 3;
+const CHIP_IMAGE_GAP = 2;
+const CHIP_IMAGE_COLUMNS = 6;
+
 function attachTranscriptChips(
-	tui: TUI, paths: readonly string[], showImages: () => boolean, captureFigures: CaptureMessageFigures,
+	tui: TUI, paths: readonly string[], showImages: () => boolean, isCovered: () => boolean,
+	captureFigures: CaptureMessageFigures,
 ): (() => void) | undefined {
 	const document = tui?.children?.[0];
 	// Pi mounts the chat container after its header and resource list.
@@ -101,18 +107,19 @@ function attachTranscriptChips(
 	let active = true;
 	let busy = false;
 	const schedule = () => {
-		if (!active || busy || !supportsImages()) return;
+		if (!active || busy || !supportsImages() || isCovered()) return;
 		busy = true;
 		// The fullscreen renderer lays out all messages. Read only chips visible in the finished frame.
 		queueMicrotask(async () => {
 			try {
-				if (!active || !supportsImages()) return;
+				if (!active || !supportsImages() || isCovered()) return;
 				const visible = new Set<number>();
 				for (const line of screen.getScreenLines?.() ?? []) {
 					if (!line.includes("▧")) continue;
 					const caption = line.split("\x1b_G", 1)[0];
-					const match = /^\s*▧ \[fig([1-9]\d*)\]/.exec(stripTerminalSequences(caption));
-					if (match) visible.add(Number(match[1]));
+					const text = stripTerminalSequences(caption).trimStart();
+					if (!text.startsWith("▧ ")) continue;
+					for (const match of text.matchAll(/▧ \[fig([1-9]\d*)\]/g)) visible.add(Number(match[1]));
 				}
 				const number = [...visible].find((id) => paths[id - 1] && !thumbnails.has(id));
 				if (number === undefined) return;
@@ -141,25 +148,53 @@ function attachTranscriptChips(
 				for (const { component } of images.values()) component.invalidate();
 			},
 			render(width) {
-				if (numbers.length) schedule();
-				return numbers.map((number) => {
-					const label = `  ▧ ${figureLink(number, paths[number - 1])}`;
-					const available = width - visibleWidth(label) - 2;
+				if (!numbers.length) return [];
+				const reserveImages = supportsImages();
+				const drawImages = reserveImages && !isCovered();
+				if (drawImages) schedule();
+				const indent = " ".repeat(CHIP_INDENT);
+				const gap = " ".repeat(CHIP_GAP);
+				const lines: string[] = [];
+				let text = indent;
+				let column = CHIP_INDENT;
+				let placements = "";
+				const flush = () => {
+					lines.push(truncateToWidth(text.trimEnd(), width) + placements);
+					text = indent;
+					column = CHIP_INDENT;
+					placements = "";
+				};
+				for (const number of numbers) {
+					const label = `▧ ${figureLink(number, paths[number - 1])}`;
+					const labelWidth = visibleWidth(label);
+					const imageColumns = reserveImages
+						? Math.max(0, Math.min(CHIP_IMAGE_COLUMNS, width - CHIP_INDENT - labelWidth - CHIP_IMAGE_GAP)) : 0;
+					const chipWidth = labelWidth + (imageColumns ? CHIP_IMAGE_GAP + imageColumns : 0);
+					if (column > CHIP_INDENT && column + CHIP_GAP + chipWidth > width) flush();
+					if (column > CHIP_INDENT) {
+						text += gap;
+						column += CHIP_GAP;
+					}
+					const imageColumn = column + labelWidth + CHIP_IMAGE_GAP;
+					text += label + " ".repeat(chipWidth - labelWidth);
+					column += chipWidth;
 					const data = thumbnails.get(number);
 					if (!data) images.delete(number);
-					if (!data || available < 3 || !supportsImages()) {
-						return truncateToWidth(label, width);
-					}
+					if (!data || !drawImages || !imageColumns) continue;
 					let image = images.get(number);
 					if (image?.data !== data) {
 						image = { data, component: new Image(data.data, data.mimeType, { fallbackColor: (text) => text }, {
-							maxWidthCells: 8, maxHeightCells: 1,
+							maxWidthCells: CHIP_IMAGE_COLUMNS, maxHeightCells: 1,
 						}) };
 						images.set(number, image);
 					}
-					const line = image.component.render(available)[0];
-					return line.startsWith("\x1b_G") ? `${label}  ${line}` : label;
-				});
+					const line = image.component.render(imageColumns + 2)[0];
+					// Paint text first so later captions cannot erase image cells.
+					// Pi caches the first placement; later native uploads reuse their own IDs.
+					if (line.startsWith("\x1b_G")) placements += `\x1b[${imageColumn + 1}G${line}`;
+				}
+				flush();
+				return lines;
 			},
 		};
 		const render = message.render;
@@ -571,7 +606,7 @@ export default function (pi: ExtensionAPI) {
 				const showImages = () => pi.getSettings?.().terminal?.showImages !== false;
 				const preview = attachFigurePreview(editor, tui, paths, showImages);
 				// Pi composites over text rows. Let our overlays cover the entire message while open.
-				const detachChips = attachTranscriptChips(tui, paths, () => showImages() && !preview?.hasOverlay(), withMessageFigures);
+				const detachChips = attachTranscriptChips(tui, paths, showImages, () => Boolean(preview?.hasOverlay()), withMessageFigures);
 				disposePreview = () => {
 					preview?.dispose();
 					detachChips?.();

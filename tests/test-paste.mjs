@@ -161,10 +161,11 @@ document.addChild(chat);
 await openDraft("", { mode: "regular", children: [document] });
 const message = new UserMessageComponent(`See ${first} again ${first} then ${second}`, undefined, 1, [draftTransform]);
 chat.addChild(message);
-const chipLines = () => message.render(100).map(stripTerminalSequences).filter((line) => line.includes("▧"));
-assert.deepEqual(chipLines(), ["  ▧ [fig1]", "  ▧ [fig2]"]);
+const chipLines = (width = 100) => message.render(width).map(stripTerminalSequences).filter((line) => line.includes("▧"));
+assert.deepEqual(chipLines(), ["  ▧ [fig1]   ▧ [fig2]"]);
+assert.deepEqual(chipLines(18), ["  ▧ [fig1]", "  ▧ [fig2]"]);
 message.setOutputPad(2);
-assert.deepEqual(chipLines(), ["  ▧ [fig1]", "  ▧ [fig2]"]);
+assert.deepEqual(chipLines(), ["  ▧ [fig1]   ▧ [fig2]"]);
 await draftHooks.session_shutdown();
 assert.deepEqual(chipLines(), []);
 
