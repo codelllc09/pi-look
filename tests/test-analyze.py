@@ -2,6 +2,8 @@
 """Lane 0+1 analyzer tests. Run with the central venv python (needs PIL + rapidocr):
     ~/.virtualenvs/main/bin/python tests/test-analyze.py
 """
+import base64
+import io
 import json
 import subprocess
 import sys
@@ -9,10 +11,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 
 ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
+sys.path.insert(0, str(ROOT))
+from scripts.analyze import _blob_stats
 
 
 def find_cjk_font() -> str | None:
@@ -32,8 +37,11 @@ def find_cjk_font() -> str | None:
 CJK = find_cjk_font()
 
 
-def analyze(path: str, tier: str | None = None) -> dict:
-    cmd = [PY, str(ROOT / "scripts" / "analyze.py"), path]
+def analyze(path: str, tier: str | None = None, *, mode: str | None = None) -> dict:
+    cmd = [PY, str(ROOT / "scripts" / "analyze.py")]
+    if mode:
+        cmd.append(mode)
+    cmd.append(path)
     if tier:
         cmd.append(tier)
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -64,6 +72,53 @@ def make_layout_image(path: str, cells: list[tuple[int, int, str]], size: tuple[
 
 
 class AnalyzerTests(unittest.TestCase):
+    def test_exif_coordinates_match_ocr_and_relay(self):
+        display = Image.new("RGB", (240, 400), "white")
+        ImageDraw.Draw(display).text((20, 300), "TEST 12345", fill="black", font=ImageFont.load_default(size=26))
+        raw = display.transpose(Image.Transpose.ROTATE_90)
+        exif = raw.getexif()
+        exif[274] = 6
+        with tempfile.TemporaryDirectory() as td:
+            p = f"{td}/rotated.jpg"
+            raw.save(p, exif=exif)
+            result = analyze(p)
+            self.assertEqual(result["image"], {"mimeType": "image/jpeg", "normalized": True})
+            self.assertEqual((result["stats"]["width"], result["stats"]["height"]), display.size)
+            line = next(line for line in result["ocr"]["lines"] if "12345" in line["text"])
+            self.assertTrue(240 < line["box"][1] < line["box"][3] <= display.height, line)
+            relay = base64.b64decode(analyze(p, mode="--relay")["data"])
+            with Image.open(io.BytesIO(relay)) as png, Image.open(p) as jpeg:
+                self.assertEqual(png.format, "PNG")
+                self.assertEqual(png.size, display.size)
+                self.assertIsNone(ImageChops.difference(png, ImageOps.exif_transpose(jpeg)).getbbox())
+
+    def test_transparent_rgb_does_not_change_stats_or_relay(self):
+        with tempfile.TemporaryDirectory() as td:
+            outputs = []
+            for i, hidden in enumerate(((0, 0, 0, 0), (255, 0, 0, 0))):
+                img = Image.new("RGBA", (480, 240), hidden)
+                ImageDraw.Draw(img).rectangle((160, 80, 319, 159), fill=(0, 140, 255, 200))
+                p = f"{td}/{i}.png"
+                img.save(p)
+                result = analyze(p, mode="--stats-only")
+                self.assertNotIn("ocr", result)
+                self.assertEqual(result["image"], {"mimeType": "image/png", "normalized": True})
+                outputs.append((result["stats"], analyze(p, mode="--relay")["data"]))
+            self.assertEqual(outputs[0], outputs[1])
+            self.assertEqual(outputs[0][0]["bg"], "#ffffff")
+
+    def test_blob_limit_stops_scanning(self):
+        class Checkerboard:
+            shape = (480, 480)
+
+            def __getitem__(self, row):
+                # 240 runs per row. Row 83 crosses the 20,000-run limit.
+                if row > 83:
+                    raise AssertionError("CCL kept scanning past the run limit")
+                return (np.arange(self.shape[1]) + row) % 2 == 0
+
+        self.assertIsNone(_blob_stats(Checkerboard()))
+
     def test_text_image(self):
         if not CJK:
             self.skipTest("no CJK font found; install noto-sans-mono-cjk-vf-fonts (or any fontconfig CJK font)")

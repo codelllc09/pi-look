@@ -22,8 +22,11 @@ questions, with local-first lanes and a vision-model lane only when needed:
 - `auto` escalation fires **only** on objective signals (no text found, or
   `avgConf < minAutoConf`), and **never** spends a VLM call when the active
   model has its own vision (`mode="vlm"` remains available as second opinion).
-- `mode="stats" | "ocr"` force a single lane. Useful even for vision models:
-  exact numbers eyes estimate poorly (verbatim text, counts, colors).
+- `mode="stats"` runs pixel analysis only. `mode="ocr"` returns local OCR
+  with pixel grounding.
+- Stats and OCR use EXIF-corrected coordinates and composite transparency
+  onto a contrasting matte. The VLM receives those same pixels as PNG when
+  normalization is needed, otherwise it receives the original image.
 - OCR output is layout-aware: lines come in reading order (column-major,
   columns left-to-right; full-width lines bridge columns and collapse to
   plain top-down), aligned multi-box rows render as markdown tables
@@ -91,7 +94,7 @@ thinking). When the host passes `onUpdate`, `look` switches the request to
 - a ≥5s heartbeat during thinking (`waiting for first token · Ns`);
 - a pi-taskwatcher status file
   (`~/.pi/agent/status/look-<id>.json`, footer chip, best-effort);
-- host abort interrupts the fetch at any time; the 180s hard timeout stays.
+- host abort stops local analysis or the VLM fetch. The fetch has a 180s timeout.
 
 Without `onUpdate` (older hosts) the request is non-streaming, identical to
 legacy behavior; a streaming endpoint that yields no text falls back to one

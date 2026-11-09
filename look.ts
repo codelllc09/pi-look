@@ -7,7 +7,8 @@
  *   look(path, mode="vlm",
  *        question="...")    → Lane 2: VLM call with Lane 0+1 output as
  *                             grounding (OCR text anchors the judgment).
- *   look(path, mode="stats"|"ocr") → force a single lane.
+ *   look(path, mode="stats") → pixel stats only.
+ *   look(path, mode="ocr")   → grounded local OCR.
  *
  * auto mode only escalates inline on an OBJECTIVE signal (no text found or
  * avgConf < minAutoConf) — intent classification is deliberately absent: the
@@ -39,9 +40,9 @@
  * forward to the host throttled (content-driven ≥2s, heartbeat ≥5s for
  * reasoning models that emit nothing while thinking) and to a pi-taskwatcher
  * footer chip (~/.pi/agent/status/look-<id>.json); without it the request is
- * non-streaming, identical to the legacy behavior. abort kills the fetch
- * (host signal ∧ 180s timeout). A stream that yields no text falls back to
- * one non-streaming retry.
+ * non-streaming, identical to the legacy behavior. The host can abort the
+ * local analyzer or the fetch (also bounded by 180s). A stream that yields
+ * no text falls back to one non-streaming retry.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -98,18 +99,32 @@ export function shouldAutoEscalate(ocr: { lines: unknown[]; avgConf: number | nu
 	return ocr.avgConf < minConf;
 }
 
-function runPython(script: string, args: string[]): Promise<string> {
+function runAnalyzer(cfg: LookConfig, args: string[], signal?: AbortSignal): Promise<string> {
+	signal?.throwIfAborted();
+	const script = path.join(import.meta.dirname, "scripts", "analyze.py");
 	return new Promise((resolve, reject) => {
-		const child = spawn(expand(script), args, { stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(resolvePython(cfg), [script, ...args], { stdio: ["ignore", "pipe", "pipe"], signal });
 		let out = "", err = "";
+		let spawnError: Error | undefined;
 		child.stdout.on("data", (d) => (out += d));
 		child.stderr.on("data", (d) => (err += d));
-		child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(`analyzer exit ${code}: ${err.slice(0, 400)}`))));
-		child.on("error", reject);
+		child.on("error", (e) => { spawnError = e; });
+		child.on("close", (code) => {
+			if (signal?.aborted) reject(signal.reason);
+			else if (spawnError) reject(spawnError);
+			else if (code === 0) resolve(out);
+			else reject(new Error(`analyzer exit ${code}: ${err.slice(0, 400)}`));
+		});
 	});
 }
 
+interface AnalyzedImage {
+	mimeType: string;
+	normalized: boolean;
+}
+
 interface Analysis {
+	image?: AnalyzedImage;
 	stats?: {
 		width: number; height: number; theme: string;
 		dominantColors: { hex: string; share: number }[]; estimatedTextRows: number;
@@ -139,12 +154,9 @@ function resolvePython(cfg: LookConfig): string {
 	return pyCache;
 }
 
-async function analyze(cfg: LookConfig, imgPath: string, forceTier?: string): Promise<Analysis> {
-	const script = path.join(import.meta.dirname, "scripts", "analyze.py");
-	const tier = forceTier ?? (cfg.ocrTier && cfg.ocrTier !== "v6-small" ? cfg.ocrTier : undefined); // analyzer defaults to v6-small
-	const args = [script, imgPath];
-	if (tier) args.push(tier);
-	const out = await runPython(resolvePython(cfg), args);
+async function analyze(cfg: LookConfig, imgPath: string, signal?: AbortSignal, opts?: { statsOnly?: boolean; tier?: string }): Promise<Analysis> {
+	const args = opts?.statsOnly ? ["--stats-only", imgPath] : [imgPath, opts?.tier ?? (cfg.ocrTier || "v6-small")];
+	const out = await runAnalyzer(cfg, args, signal);
 	return JSON.parse(out) as Analysis;
 }
 
@@ -161,15 +173,17 @@ export function shouldTierRetry(a: Analysis, configuredTier: string | undefined)
 	return lines <= Math.floor(rows / 2);
 }
 
-/** analyze + one-shot tier escalation; the retry wins only on strictly more
- *  lines, is best-effort (never fails the run), and never re-runs lane 0. */
-async function analyzeWithRetry(cfg: LookConfig, imgPath: string): Promise<Analysis> {
-	const a = await analyze(cfg, imgPath);
+/** One-shot tier escalation; the retry wins only on strictly more lines. */
+async function analyzeWithRetry(cfg: LookConfig, imgPath: string, signal?: AbortSignal): Promise<Analysis> {
+	const a = await analyze(cfg, imgPath, signal);
 	if (cfg.ocrTierRetry === false || !shouldTierRetry(a, cfg.ocrTier)) return a;
 	try {
-		const b = await analyze(cfg, imgPath, "v6-medium");
+		const b = await analyze(cfg, imgPath, signal, { tier: "v6-medium" });
 		if ((b.ocr?.lines.length ?? 0) > (a.ocr?.lines.length ?? 0)) return b;
-	} catch { /* retry is best-effort — keep the first pass */ }
+	} catch {
+		signal?.throwIfAborted();
+		// Retry is best-effort; keep the first pass on analyzer failure.
+	}
 	return a;
 }
 
@@ -199,7 +213,8 @@ function apiKey(provider: string): string {
 type OnUpdate = (partial: { content: { type: "text"; text: string }[]; details: undefined }) => void;
 
 interface VlmOpts {
-	signal?: AbortSignal; // host abort → abort the fetch
+	signal?: AbortSignal; // host abort → abort image preparation and fetch
+	image?: AnalyzedImage;
 	onUpdate?: OnUpdate; // present → stream + progress forwarding
 	taskId?: string; // pi-taskwatcher status id; undefined → no status file
 	owner?: string; // owning conversation id
@@ -275,13 +290,22 @@ export async function readSSE(res: Response, model: string, opts: VlmOpts, t0: n
 }
 
 export async function callVLM(cfg: LookConfig, question: string, imgPath: string, grounding: string, opts: VlmOpts = {}): Promise<string> {
+	opts.signal?.throwIfAborted();
 	const slash = cfg.visionModel.indexOf("/");
 	const provider = cfg.visionModel.slice(0, slash);
 	const model = cfg.visionModel.slice(slash + 1);
 	const endpoint = cfg.vlmEndpoints?.[provider] ?? ENDPOINTS[provider];
 	if (!endpoint) throw new Error(`no endpoint for provider "${provider}" — set vlmEndpoints["${provider}"] in pi-look.json`);
-	const b64 = fs.readFileSync(imgPath).toString("base64");
+	let imageUrl: string;
+	if (opts.image?.normalized) {
+		const out = await runAnalyzer(cfg, ["--relay", imgPath], opts.signal);
+		imageUrl = `data:image/png;base64,${(JSON.parse(out) as { data: string }).data}`;
+	} else {
+		const bytes = await fs.promises.readFile(imgPath, { signal: opts.signal });
+		imageUrl = `data:${opts.image?.mimeType ?? "image/png"};base64,${bytes.toString("base64")}`;
+	}
 	const askOnce = async (maxTokens: number, stream: boolean) => {
+		opts.signal?.throwIfAborted();
 		const body: Record<string, unknown> = {
 		model,
 		max_tokens: maxTokens,
@@ -290,7 +314,7 @@ export async function callVLM(cfg: LookConfig, question: string, imgPath: string
 				role: "user",
 				content: [
 					{ type: "text", text: question + `\n\n[protocol] Separate what is VISIBLE in the image from what you INFER. Mark inferences that lack in-image evidence as "(uncertain)" instead of asserting them.` + (grounding ? `\n\n[grounding] Local OCR and pixel stats (may be partial or wrong; trust the image when they conflict):\n${grounding}` : "") },
-					{ type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } },
+					{ type: "image_url", image_url: { url: imageUrl } },
 				],
 			}],
 		};
@@ -462,7 +486,7 @@ export default function (pi: ExtensionAPI) {
 			"When the conversation references an image path and you cannot see images natively, call look(path): local pixel stats and verbatim OCR answer most questions. Add mode=\"vlm\" with a question only when visual semantics are needed.",
 		],
 		description:
-			"Look at an image file through a three-lane pipeline. Useful even if you can already see images: the stats/OCR lanes give EXACT numbers your eyes estimate poorly (dimensions, colors, verbatim text, counts). Default (no mode): pixel stats + local OCR — cheap and local; check whether that answers your question before going further. mode='vlm' with a question: asks a vision model grounded with the local OCR — use for semantics ('what is this', shapes, UIs, likeness), when you cannot see images, or as a second opinion. mode='stats'/'ocr': force one lane. Heavier classical CV (contours, template matching, color segmentation, connected components, etc.) you can always write yourself in bash+python.",
+			"Look at an image file through a three-lane pipeline. The local lanes provide dimensions, approximate colors and layout, and OCR text. Default (no mode): pixel stats + local OCR — check whether that answers your question before going further. mode='vlm' with a question: asks a vision model grounded with local stats and OCR — use for semantics ('what is this', shapes, UIs, likeness), when you cannot see images, or as a second opinion. mode='stats': pixel stats only. mode='ocr': local OCR with pixel grounding. Heavier classical CV (contours, template matching, color segmentation, connected components, etc.) you can always write yourself in bash+python.",
 		parameters: Type.Object({
 			path: Type.String({ description: "Image file path (png/jpg/webp/bmp)" }),
 			mode: Type.Optional(Type.String({ description: "Lane selection: auto (default) | stats | ocr | vlm" })),
@@ -480,20 +504,18 @@ export default function (pi: ExtensionAPI) {
 			const vopts: VlmOpts = { signal, onUpdate, taskId, owner: ctx?.sessionManager?.getSessionId?.() };
 			try {
 				if (mode === "vlm") {
-					const a = await analyze(cfg, img);
-					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely.", img, fmtAnalysis(a, cfg), vopts);
+					const a = await analyze(cfg, img, signal);
+					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely.", img, fmtAnalysis(a, cfg), { ...vopts, image: a.image });
 					if (taskId) writeStatus(taskId, 1, 1, `vlm done · ${answer.length} chars`, vopts.owner);
 					return { content: [{ type: "text", text: answer + `\n\n[grounding used]\n${fmtAnalysis(a, cfg).slice(0, 600)}` }], details: undefined };
 				}
-				// Tier-retry gate serves text extraction (auto/ocr); stats-only and vlm
-				// grounding paths skip it (no OCR consumer / vlm has its own eyes).
-				const a = mode === "stats" ? await analyze(cfg, img) : await analyzeWithRetry(cfg, img);
+				const a = mode === "stats" ? await analyze(cfg, img, signal, { statsOnly: true }) : await analyzeWithRetry(cfg, img, signal);
 				if (mode === "auto" && shouldAutoEscalate(a.ocr ?? { lines: [], avgConf: null }, cfg.minAutoConf)) {
 					if (visionCapable()) {
 						// Never spend a VLM call on a model with its own eyes (explicit mode=vlm still allowed).
 						return { content: [{ type: "text", text: fmtAnalysis(a, cfg) + `\n\n[hint] OCR found little; you have vision — inspect the image yourself, or call look(path, mode="vlm", question="...") for a second opinion.` }], details: undefined };
 					}
-					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely; OCR found little or no text.", img, fmtAnalysis(a, cfg), vopts);
+					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely; OCR found little or no text.", img, fmtAnalysis(a, cfg), { ...vopts, image: a.image });
 					if (taskId) writeStatus(taskId, 1, 1, `vlm done · ${answer.length} chars`, vopts.owner);
 					return { content: [{ type: "text", text: `[auto→vlm: ocr empty/low-conf]\n${answer}\n\n[grounding used]\n${fmtAnalysis(a, cfg).slice(0, 600)}` }], details: undefined };
 				}

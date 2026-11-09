@@ -10,20 +10,22 @@ and reports per-line confidence. Tofu markers (□, U+FDD0..U+FDEF, U+FFFD)
 are counted in the *recognized text*, where they are unambiguous characters
 — not guessed from pixels.
 
-Usage: analyze.py <image> [tier]
+Usage: analyze.py [--stats-only | --relay] <image> [tier]
+  --stats-only: skip OCR; --relay: output the normalized image as base64 PNG
   tier: v6-small (default, bundled in the wheel, offline) | v6-medium
         | v5-mobile | v5-server | v4-mobile   (non-bundled tiers download
         on first use; invalid tiers fall back to v6-small)
 Known v6 rec quirk: fullwidth punctuation may be normalized to halfwidth
 (：→:); spacing between CJK and latin runs is preserved as recognized.
 """
+import base64
 import io
 import json
 import sys
 
 try:
     import numpy as np
-    from PIL import Image
+    from PIL import Image, ImageOps
 except ImportError as e:
     print(
         f"pi-look analyzer deps missing ({e}). Install for this interpreter, e.g.:\n"
@@ -86,6 +88,8 @@ def _blob_stats(mask: "np.ndarray") -> dict | None:
         row = mask[y]
         d = np.diff(np.concatenate(([0], row.astype(np.int8), [0])))
         starts = np.flatnonzero(d == 1)
+        if len(runs) + len(starts) > 20000:
+            return None
         ends = np.flatnonzero(d == -1)
         cur: list[int] = []
         for s, e in zip(starts.tolist(), ends.tolist()):
@@ -106,7 +110,7 @@ def _blob_stats(mask: "np.ndarray") -> dict | None:
                     parent[ri] = rj
                 pj += 1
         prev = cur
-    if len(runs) > 20000 or not runs:
+    if not runs:
         return None
 
     area: dict[int, int] = {}
@@ -247,8 +251,29 @@ def _structure(rgb480: "np.ndarray", gray: "np.ndarray", mask: "np.ndarray", val
     return out
 
 
+def _normalize_image(img: Image.Image) -> tuple[Image.Image, bool]:
+    """Shared RGB pixels and whether the original needs re-encoding for VLM."""
+    oriented = img.getexif().get(274) in range(2, 9)
+    if oriented:
+        ImageOps.exif_transpose(img, in_place=True)
+    if img.has_transparency_data:
+        rgba = img if img.mode == "RGBA" else img.convert("RGBA")
+        alpha = rgba.getchannel("A")
+        if alpha.getextrema()[0] < 255:
+            # Estimate visible brightness with a small, alpha-weighted sample.
+            # A contrasting matte keeps both light and dark glyphs legible.
+            sample = rgba.resize((min(img.width, 160), min(img.height, 160)), Image.Resampling.BOX)
+            weights = np.asarray(sample.getchannel("A"))
+            lightness = np.asarray(sample.convert("L"))
+            matte = 255 if not weights.any() or np.average(lightness, weights=weights) < 128 else 0
+            rgb = Image.new("RGB", img.size, (matte, matte, matte))
+            rgb.paste(rgba, mask=alpha)
+            return rgb, True
+    return (img if img.mode == "RGB" else img.convert("RGB")), oriented
+
+
 def lane0(img: Image.Image) -> dict:
-    rgb = img.convert("RGB")
+    rgb = img if img.mode == "RGB" else img.convert("RGB")
     w, h = rgb.size
     # Dominant colors via downscaled quantize (fast, good enough for hints).
     small = rgb.resize((min(w, 160), min(h, 160)))
@@ -408,7 +433,7 @@ def _detect_tables(lines: list) -> list:
     return tables
 
 
-def lane1(path: str, tier: str = "v6-small") -> dict:
+def lane1(img: Image.Image, tier: str = "v6-small") -> dict:
     try:
         from rapidocr import RapidOCR, EngineType, ModelType, OCRVersion
     except Exception as e:  # pragma: no cover - environment dependent
@@ -427,7 +452,7 @@ def lane1(path: str, tier: str = "v6-small") -> dict:
         params[f"{stage}.ocr_version"] = version
         params[f"{stage}.model_type"] = model_type
     ocr = RapidOCR(params=params)
-    result = ocr(path)
+    result = ocr(img)
     # numpy arrays: `or []` triggers ambiguous-truth ValueError — test against None
     txts = list(result.txts) if result.txts is not None else []
     scores = list(result.scores) if result.scores is not None else []
@@ -466,18 +491,27 @@ def lane1(path: str, tier: str = "v6-small") -> dict:
 
 
 def main() -> int:
-    if len(sys.argv) not in (2, 3):
-        print("usage: analyze.py <image> [tier]", file=sys.stderr)
+    args = sys.argv[1:]
+    mode = args.pop(0) if args and args[0] in ("--stats-only", "--relay") else None
+    if len(args) not in (1, 2) or (mode is not None and len(args) != 1):
+        print("usage: analyze.py [--stats-only | --relay] <image> [tier]", file=sys.stderr)
         return 2
-    path = sys.argv[1]
-    tier = sys.argv[2] if len(sys.argv) == 3 else "v6-small"
     try:
-        img = Image.open(io.open(path, "rb"))
-        img.load()
+        with Image.open(args[0]) as src:
+            src.load()
+            mime = Image.MIME.get(src.format)
+            img, normalized = _normalize_image(src)
     except Exception as e:
         print(json.dumps({"error": f"cannot open image: {e}"}))
         return 3
-    out = {"stats": lane0(img), "ocr": lane1(path, tier)}
+    if mode == "--relay":
+        png = io.BytesIO()
+        img.save(png, format="PNG")
+        print(json.dumps({"data": base64.b64encode(png.getbuffer()).decode("ascii")}))
+        return 0
+    out = {"stats": lane0(img), "image": {"mimeType": mime or "image/png", "normalized": normalized or mime is None}}
+    if mode != "--stats-only":
+        out["ocr"] = lane1(img, args[1] if len(args) == 2 else "v6-small")
     print(json.dumps(out, ensure_ascii=False))
     return 0
 

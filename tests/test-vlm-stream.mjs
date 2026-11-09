@@ -21,7 +21,7 @@ writeFileSync(join(agent, "auth.json"), JSON.stringify({ mockprov: { type: "api"
 const png = join(agent, "px.png");
 writeFileSync(png, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mPkz8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==", "base64"));
 
-const { callVLM } = await import(bundle);
+const { callVLM, default: registerLook } = await import(bundle);
 
 let n = 0; // test counter
 const done = (name) => console.log(`ok ${++n} - ${name}`);
@@ -110,6 +110,76 @@ const sseHeaders = { "Content-Type": "text/event-stream", "Cache-Control": "no-c
 		(e) => /abort/i.test(e.message),
 	);
 	done("host abort rejects the in-flight VLM call");
+}
+
+// Tool entry point: analyzer flags, relay selection, and cancellation during retry.
+{
+	const analyzer = join(agent, "fake-python");
+	const retryPid = join(agent, "retry.pid");
+	writeFileSync(analyzer, `#!/usr/bin/env node
+const fs = require("node:fs");
+const [first, second] = process.argv.slice(3);
+const stats = { width: 1, height: 1, theme: "dark", dominantColors: [], estimatedTextRows: 0 };
+if (first === "--stats-only") {
+  console.log(JSON.stringify({ stats }));
+} else if (first === "--relay") {
+  console.log(JSON.stringify({ data: fs.readFileSync(${JSON.stringify(png)}, "base64") }));
+} else if (second === "v6-medium") {
+  fs.writeFileSync(${JSON.stringify(retryPid)}, String(process.pid));
+  setTimeout(() => process.exit(91), 5000);
+} else {
+  if (first.endsWith("retry.jpg")) stats.estimatedTextRows = 6;
+  const image = { mimeType: "image/jpeg", normalized: first.endsWith("rotated.jpg") };
+  const ocr = { available: true, lines: [], avgConf: null };
+  console.log(JSON.stringify({ stats, image, ocr }));
+}
+`, { mode: 0o700 });
+	writeFileSync(join(agent, "pi-look.json"), JSON.stringify({ ...cfg, pythonPath: analyzer }));
+	let tool;
+	registerLook({ on() {}, registerTool(spec) { tool = spec; } });
+
+	const stats = await tool.execute("stats", { path: png, mode: "stats" });
+	assert.match(stats.content[0].text, /^\[stats\] 1x1/);
+	assert.ok(!stats.content[0].text.includes("[ocr]"));
+	done("stats mode requests pixel analysis only");
+
+	const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+	for (const [filename, mode, expected] of [
+		["plain.jpg", "vlm", `data:image/jpeg;base64,${jpegBytes.toString("base64")}`],
+		["rotated.jpg", "auto", `data:image/png;base64,${readFileSync(png, "base64")}`],
+	]) {
+		const path = join(agent, filename);
+		writeFileSync(path, jpegBytes);
+		handler = async (req, res) => {
+			const body = await readBody(req);
+			const [prompt, image] = body.messages[0].content;
+			assert.match(prompt.text, /\[grounding\][^\n]*\n\[stats\]/);
+			assert.equal(image.image_url.url, expected);
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }));
+		};
+		const result = await tool.execute(filename, { path, mode });
+		assert.ok(!result.isError, result.content[0].text);
+	}
+	done("VLM forwards original JPEG bytes or the normalized PNG with grounding");
+
+	const retry = join(agent, "retry.jpg");
+	writeFileSync(retry, jpegBytes);
+	const ac = new AbortController();
+	const pending = tool.execute("retry", { path: retry, mode: "ocr" }, ac.signal);
+	let pid;
+	try {
+		const deadline = Date.now() + 3000;
+		while (!existsSync(retryPid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+		pid = Number(readFileSync(retryPid, "utf8"));
+	} finally {
+		ac.abort();
+	}
+	const canceled = await pending;
+	assert.equal(canceled.isError, true);
+	assert.equal(canceled.content[0].text, "look: aborted by user");
+	assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+	done("abort stops the active Python retry and propagates to the caller");
 }
 
 server.close();
