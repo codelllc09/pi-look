@@ -37,11 +37,10 @@ questions, with local-first lanes and a vision-model lane only when needed:
 - Lane 0 is structure-aware: `[structure]` reports bg/ink separation,
   colorfulness, grayscale, saturated accent colors, pixel-projection column
   count, row-gap regularity, and ink-blob statistics (count, dominant size
-  class, uniformity, horizontal skew); `[grid WxH]` is a compact thumbnail
-  — `·░▒▓█` ink mass, `≡` fine texture (glyph/edge density via Sobel),
-  RGBYCM hue letters for strongly colored cells — giving text-only models a
-  first look at WHERE content sits and whether dense areas are text or flat
-  graphics. Still pure pixel statistics, never interpretation.
+  class, uniformity, horizontal skew). `[grid WxH]` shows ink density
+  (`·░▒▓█`), high Sobel edge density (`≡`), and hue letters (`RGBYCM`)
+  for saturated cells whose average RGB differs from the image average.
+  Hue is measured independently of the ink mask.
 
 ## Takeover for text-only models
 
@@ -120,13 +119,11 @@ small, bundled in the `rapidocr` wheel, fully offline) or `v6-medium` /
 `v5-mobile` / `v5-server` / `v4-mobile` (downloaded on first use). The
 EOL `rapidocr-onnxruntime` package (PP-OCRv4) is no longer used.
 
-`ocrTierRetry` (default `true`): when the default tier finds at most half
-the text rows the pixel lane estimates (dense tables/documents where det
-merged lines), `look` retries once with `v6-medium` and keeps whichever
-pass found more lines; the winning tier is shown as `tier=…` in the OCR
-header. Latency caveat: a retry on a large image can take 10–15 s, and
-line-less photos can fire the gate — set `false` to disable.
-```
+`ocrTierRetry` (default `true`) excludes wide, aligned solid bands from
+the retry count. If at least four bands remain and the default tier finds
+at most half as many OCR lines, `look` retries once with `v6-medium`.
+Medium wins only with more lines and is marked `tier=…`. A retry on a
+large image can take 10–15 s. Set `false` to disable it.
 
 `pythonPath` (optional) pins an explicit analyzer interpreter. Default:
 auto-resolve — central uv venv (`~/.virtualenvs/main/bin/python`) if

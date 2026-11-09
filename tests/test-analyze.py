@@ -17,7 +17,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
 sys.path.insert(0, str(ROOT))
-from scripts.analyze import _blob_stats
+from scripts.analyze import _blob_stats, lane0
 
 
 def find_cjk_font() -> str | None:
@@ -118,6 +118,55 @@ class AnalyzerTests(unittest.TestCase):
                 return (np.arange(self.shape[1]) + row) % 2 == 0
 
         self.assertIsNone(_blob_stats(Checkerboard()))
+
+    def test_lined_text_separates_solid_bands_from_ocr_rows(self):
+        if not CJK:
+            self.skipTest("no CJK font found")
+        img = Image.new("L", (520, 300), 245)
+        draw = ImageDraw.Draw(img)
+        font = ImageFont.truetype(CJK, 17)
+        expected = []
+        for i in range(6):
+            y = 16 + i * 34
+            text = f"第{i+1:02d}行 金额{1206 + i * 17} 项目AB{i+41}"
+            expected.append(text.replace(" ", ""))
+            draw.text((32, y), text, font=font, fill=25)
+            draw.line((10, y+29, 509, y+29), fill=25)
+        with tempfile.TemporaryDirectory() as td:
+            p = f"{td}/lined.png"
+            img.save(p)
+            result = analyze(p)
+        self.assertEqual(result["stats"]["estimatedTextRows"], 12)
+        self.assertEqual(result["stats"]["solidRowBands"], 6)
+        self.assertEqual(["".join(line["text"].split()) for line in result["ocr"]["lines"]], expected)
+
+    def test_row_gap_uses_the_same_merged_bands_as_the_count(self):
+        img = Image.new("L", (480, 240), 255)
+        draw = ImageDraw.Draw(img)
+        for y in (60, 80, 100):
+            draw.line((60, y, 140, y), fill=0)
+            draw.line((60, y+3, 140, y+3), fill=0)
+        stats = lane0(img)
+        self.assertEqual(stats["estimatedTextRows"], 3)
+        self.assertEqual(stats["rowGap"], 20)
+        self.assertTrue(stats["rowGapRegular"])
+
+    def test_grid_hue_is_independent_of_the_ink_mask(self):
+        img = Image.new("RGB", (480, 240), (255, 0, 0))
+        self.assertEqual(lane0(img)["grid"]["cells"], ["········"] * 6)
+        ImageDraw.Draw(img).rectangle((240, 0, 479, 239), fill=(0, 130, 0))
+        stats = lane0(img)
+        self.assertEqual(stats["estimatedTextRows"], 0)  # both halves have gray value 76
+        self.assertEqual(stats["grid"]["cells"], ["RRRRGGGG"] * 6)
+
+        img = Image.new("RGB", (480, 240), "black")
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((120, 40, 179, 79), fill=(255, 248, 0))
+        draw.rectangle((300, 40, 359, 79), fill=(0, 204, 255))
+        self.assertEqual(lane0(img)["grid"]["cells"][1], "··Y··C··")
+
+        with Image.open(ROOT / "tests/fixtures/judge-2026-11-01/judge3.png") as img:
+            self.assertIn("Y", "".join(lane0(img)["grid"]["cells"]))  # thin yellow ring
 
     def test_text_image(self):
         if not CJK:
@@ -258,7 +307,7 @@ class AnalyzerTests(unittest.TestCase):
             self.assertTrue(s["gray"])
             self.assertEqual(s["colorfulness"], "low")
             self.assertIn("cells", s["grid"])
-            self.assertTrue(any(ch in "░▒▓█≡" for row in s["grid"]["cells"] for ch in row))  # ≡ = glyph texture since batch 5
+            self.assertTrue(any(ch in "░▒▓█≡" for row in s["grid"]["cells"] for ch in row))
             self.assertNotIn("accent", s)
             self.assertTrue(s["ink"], "ink must resolve on a text image")
             # saturated red block on gray bg: accent fires, colorful, not gray

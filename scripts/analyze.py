@@ -22,6 +22,7 @@ import base64
 import io
 import json
 import sys
+from colorsys import rgb_to_hsv
 
 try:
     import numpy as np
@@ -141,7 +142,29 @@ def _hex(c) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def _structure(rgb480: "np.ndarray", gray: "np.ndarray", mask: "np.ndarray", valid: bool, bands_raw: list, gh: int, h: int, small: Image.Image, dom: list) -> dict:
+def _projection_bands(coverage: "np.ndarray") -> list[list[int]]:
+    """Merge active spans separated by up to three blank pixels."""
+    bands: list[list[int]] = []
+    for pos in np.flatnonzero(coverage > 0.02).tolist():
+        if bands and pos - bands[-1][1] <= 4:
+            bands[-1][1] = pos
+        else:
+            bands.append([pos, pos])
+    return bands
+
+
+def _is_solid_row_band(band: "np.ndarray") -> bool:
+    """Each scanline must have one aligned run at least half the image wide."""
+    width = band.shape[1]
+    lengths = band.sum(axis=1)
+    if np.any(lengths * 2 < width):
+        return False
+    left = band.argmax(axis=1)
+    right = width - band[:, ::-1].argmax(axis=1)
+    return bool(np.all(right - left == lengths) and np.ptp(left) <= 2 and np.ptp(right) <= 2)
+
+
+def _structure(rgb480: "np.ndarray", gray: "np.ndarray", mask: "np.ndarray", valid: bool, bands: list[list[int]], h: int, small: Image.Image) -> dict:
     """Objective structure facts derived from pixels: bg/ink separation,
     colorfulness, grayscale, accent colors, column bands, row-gap regularity,
     and a density/hue grid thumbnail. Never interprets."""
@@ -178,72 +201,39 @@ def _structure(rgb480: "np.ndarray", gray: "np.ndarray", mask: "np.ndarray", val
     except Exception:
         pass
 
-    # Column bands: vertical projection of the ink mask (works without OCR).
-    # Per-character fragmentation at 480px needs a gap-merge first (same ≤4
-    # rule as row bands), then drop bands narrower than 5% of the width.
-    col_ink = mask.mean(axis=0) if valid else np.zeros(mask.shape[1])
-    xraw = []
-    inside = False
-    for x, v in enumerate(col_ink):
-        if v > 0.02 and not inside:
-            xraw.append([x, x])
-            inside = True
-        elif v > 0.02:
-            xraw[-1][1] = x
-        else:
-            inside = False
-    xbands = []
-    for start, end in xraw:
-        if xbands and start - xbands[-1][1] <= 4:
-            xbands[-1][1] = end
-        else:
-            xbands.append([start, end])
+    # Merge per-character gaps before dropping bands narrower than 5%.
+    xbands = _projection_bands(mask.mean(axis=0))
     xbands = [b for b in xbands if (b[1] - b[0]) >= 0.05 * mask.shape[1]]
     out["columns"] = min(len(xbands), 5) if len(xbands) >= 2 else 1
 
     out["blobs"] = _blob_stats(mask) if valid else None
 
     # Row-gap regularity (display scale = original px).
-    if len(bands_raw) >= 3:
-        starts = [b[0] for b in bands_raw]
-        gaps = np.diff(starts)
-        if float(gaps.mean()) > 0:
-            out["rowGap"] = int(round(float(np.median(gaps)) * h / gh))
-            out["rowGapRegular"] = bool(float(gaps.std() / gaps.mean()) < 0.15)
+    gh, gw = mask.shape
+    if len(bands) >= 3:
+        gaps = np.diff([start for start, _ in bands])
+        out["rowGap"] = int(round(float(np.median(gaps)) * h / gh))
+        out["rowGapRegular"] = bool(float(gaps.std() / gaps.mean()) < 0.15)
 
-    # Grid thumbnail: density chars, texture char for edge-dense cells
-    # (fine text/glyph texture vs flat mass), hue letters for strong colors.
+    # Hue uses RGB contrast independently of the grayscale ink mask.
+    image_rgb = np.asarray(small).mean(axis=(0, 1))
     edge = _sobel_mag(gray) > 48
-    gw, ghh = mask.shape[1], mask.shape[0]
-    cn, rn = min(8, max(1, gw // 40)), min(6, max(1, ghh // 40))
+    cn, rn = min(8, max(1, gw // 40)), min(6, max(1, gh // 40))
     rows = []
     for r in range(rn):
         s = ""
         for c in range(cn):
-            ys, ye = r * ghh // rn, (r + 1) * ghh // rn
+            ys, ye = r * gh // rn, (r + 1) * gh // rn
             xs, xe = c * gw // cn, (c + 1) * gw // cn
             cell = mask[ys:ye, xs:xe]
             d = float(cell.mean()) if cell.size else 0.0
             de = float(edge[ys:ye, xs:xe].mean()) if cell.size else 0.0
             mean_rgb = f[ys:ye, xs:xe].mean(axis=(0, 1))
-            mx, mn = float(mean_rgb.max()), float(mean_rgb.min())
-            if mx > 0 and (mx - mn) / mx > 0.30 and d >= 0.02:
-                hi = [i for i, v in enumerate(mean_rgb) if v == mx]
-                if mean_rgb[0] == mx and mean_rgb[1] == mx:
-                    ch = "Y"
-                elif mean_rgb[2] == mx and mean_rgb[1] == mx:
-                    ch = "C"
-                elif mean_rgb[0] == mx and mean_rgb[2] == mx:
-                    ch = "M"
-                elif mean_rgb[0] == mx:
-                    ch = "R"
-                elif mean_rgb[1] == mx:
-                    ch = "G"
-                else:
-                    ch = "B"
-                s += ch
+            hue, saturation, _ = rgb_to_hsv(*(mean_rgb / 255))
+            if saturation > 0.30 and np.abs(mean_rgb - image_rgb).max() >= 10:
+                s += "RYGCBM"[int(hue * 6 + 0.5) % 6]
             elif de >= 0.10:
-                s += "≡"  # fine texture (glyphs), not flat mass
+                s += "≡"
             else:
                 s += "·" if d < 0.05 else "░" if d < 0.2 else "▒" if d < 0.5 else "▓" if d < 0.8 else "█"
         rows.append(s)
@@ -295,44 +285,20 @@ def lane0(img: Image.Image) -> dict:
     dark_bg = bool(gray.mean() < 128)
     t, valid = _otsu(gray)
     if not valid:
-        ink_rows = np.zeros(gray.shape[0])
         mask = np.zeros(gray.shape, dtype=bool)
     else:
         # `<=` on light bg: Otsu's t can sit exactly on the dark mode's bin
         # (variance plateau), and a strict `<` would drop the whole mode.
         mask = gray > t if dark_bg else gray <= t
-        ink_rows = mask.mean(axis=1)
-    bands_raw = []
-    inside = False
-    for y, v in enumerate(ink_rows):
-        if v > 0.02 and not inside:
-            bands_raw.append([y, y])
-            inside = True
-        elif v > 0.02:
-            bands_raw[-1][1] = y
-        else:
-            inside = False
-    # Merge bands separated by tiny gaps (descenders/antialiasing splits).
-    bands = 0
-    prev_end = None
-    for start, end in bands_raw:
-        if prev_end is not None and start - prev_end <= 4:
-            prev_end = end
-        else:
-            bands += 1
-            prev_end = end
+    bands = _projection_bands(mask.mean(axis=1))
     return {
         "width": w,
         "height": h,
         "theme": "dark" if dark_bg else "light",
         "dominantColors": dom,
-        "estimatedTextRows": bands,
-            **{
-            k: v
-            for k, v in _structure(
-                np.asarray(rgb.resize(gray_img.size)), gray, mask, valid, bands_raw, gray.shape[0], h, small, dom
-            ).items()
-        },
+        "estimatedTextRows": len(bands),
+        "solidRowBands": sum(1 for start, end in bands if _is_solid_row_band(mask[start:end+1])),
+        **_structure(np.asarray(rgb.resize(gray_img.size)), gray, mask, valid, bands, h, small),
     }
 
 

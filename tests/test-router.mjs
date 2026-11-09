@@ -19,7 +19,7 @@ assert.equal(shouldAutoEscalate({ lines: [{ conf: 0.3, text: "x" }], avgConf: 0.
 assert.equal(shouldAutoEscalate({ lines: [{ conf: 0.9, text: "x" }], avgConf: null }, 0.3), true);
 
 // Tier-retry gate: only the default tier, rows>=4, and lines <= rows/2.
-const A = (rows, lines) => ({ stats: { width: 1, height: 1, theme: "dark", dominantColors: [], estimatedTextRows: rows }, ocr: { available: true, lines: Array.from({ length: lines }, () => ({ conf: 0.9, text: "x" })), avgConf: 0.9, text: "", tofuCount: 0 } });
+const A = (rows, lines, solidRowBands) => ({ stats: { width: 1, height: 1, theme: "dark", dominantColors: [], estimatedTextRows: rows, solidRowBands }, ocr: { available: true, lines: Array.from({ length: lines }, () => ({ conf: 0.9, text: "x" })), avgConf: 0.9, text: "", tofuCount: 0 } });
 // Dense table missed by det: 20 bands, 5 lines → retry.
 assert.equal(shouldTierRetry(A(20, 5), undefined), true);
 // 0 lines with text-like bands → retry (photo-latency caveat documented).
@@ -34,8 +34,10 @@ assert.equal(shouldTierRetry(A(3, 0), undefined), false);
 // Non-default configured tier opts out entirely.
 assert.equal(shouldTierRetry(A(20, 5), "v6-medium"), false);
 assert.equal(shouldTierRetry(A(20, 5), "v4-mobile"), false);
-
-console.log("test-router: 14/14 passed");
+// Wide rules and cards inflate the projection without adding text rows.
+assert.equal(shouldTierRetry(A(6, 0, 6), undefined), false);
+assert.equal(shouldTierRetry(A(12, 6, 6), undefined), false);
+assert.equal(shouldTierRetry(A(16, 5, 6), undefined), true);
 
 // ---- fmtAnalysis rendering (batch 3) ----
 const AX = {
@@ -87,4 +89,4 @@ const AT = { ocr: { available: true, tier: "v6-medium", lines: [{ conf: 0.99, te
 assert.ok(fmtAnalysis(AT).includes("tier=v6-medium"));
 assert.ok(!fmtAnalysis(AT, { visionModel: "x/y", minAutoConf: 0.3, takeover: true, ocrTier: "v6-medium" }).includes("tier="));
 
-console.log("test-router: 34/34 passed");
+console.log("test-router: assertions passed");

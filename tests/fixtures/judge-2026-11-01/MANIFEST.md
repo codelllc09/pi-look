@@ -40,3 +40,24 @@ not the data. Remaining fix paths: engine swap, or context-aware post
 correction (model domain — note glm-5.3-flash and 4.6v also misread it,
 so treat O/0 as a shared known limitation, not a RapidOCR-specific bug).
 Do not re-try preprocessing variants without new evidence.
+
+## Retry follow-up — 2026-11-09
+
+Measured both tiers on the old gate's 11 triggers across 26 PNGs (four
+repository fixtures and 22 generated graphics, normal text, and hard text).
+Ignore a merged band for retry if each scanline is one continuous run
+covering at least half the image width and both edges vary by at most
+two analysis pixels. The displayed row count still includes those bands.
+
+| Local OCR replay | Retries | Median | P95 |
+|---|---:|---:|---:|
+| Original gate | 11 | 1.68 s | 9.22 s |
+| Exclude solid bands | 6 | 1.22 s | 9.08 s |
+
+The timings sum measured analyzer subprocess durations per image. The new
+gate skipped four graphics-only retries and one lined-text retry. Small
+recognized all six lined-text rows, while medium split them into 18 boxes
+and rendered a table. Both low-contrast cases with exact-row gains still
+retry, recovering one and 13 complete rows after NFKC and whitespace
+normalization.
+Short rules, dashed rules, and two-up blank cards still retry in this set.

@@ -128,6 +128,7 @@ interface Analysis {
 	stats?: {
 		width: number; height: number; theme: string;
 		dominantColors: { hex: string; share: number }[]; estimatedTextRows: number;
+		solidRowBands?: number;
 		bg?: string; ink?: string | null; colorfulness?: string; gray?: boolean;
 		accent?: { hex: string; share: number }[]; columns?: number;
 		rowGap?: number; rowGapRegular?: boolean;
@@ -160,14 +161,11 @@ async function analyze(cfg: LookConfig, imgPath: string, signal?: AbortSignal, o
 	return JSON.parse(out) as Analysis;
 }
 
-/** Narrow weak-signal gate (batch 2, user-ruled 2026-11-09): the default tier
- *  found at most half the row bands the pixel lane estimates — det likely
- *  merged or missed lines (dense tables/documents). Escalate once to
- *  v6-medium. Photos with 0 lines can also fire (documented latency caveat);
- *  a non-default configured tier opts out entirely. Exported for tests. */
+/** The default tier may have missed text if it found at most half the
+ * remaining row bands after excluding wide, solid runs. */
 export function shouldTierRetry(a: Analysis, configuredTier: string | undefined): boolean {
 	if (configuredTier && configuredTier !== "v6-small") return false;
-	const rows = a.stats?.estimatedTextRows ?? 0;
+	const rows = (a.stats?.estimatedTextRows ?? 0) - (a.stats?.solidRowBands ?? 0);
 	const lines = a.ocr?.lines.length ?? 0;
 	if (rows < 4) return false;
 	return lines <= Math.floor(rows / 2);
@@ -486,7 +484,7 @@ export default function (pi: ExtensionAPI) {
 			"When the conversation references an image path and you cannot see images natively, call look(path): local pixel stats and verbatim OCR answer most questions. Add mode=\"vlm\" with a question only when visual semantics are needed.",
 		],
 		description:
-			"Look at an image file through a three-lane pipeline. The local lanes provide dimensions, approximate colors and layout, and OCR text. Default (no mode): pixel stats + local OCR — check whether that answers your question before going further. mode='vlm' with a question: asks a vision model grounded with local stats and OCR — use for semantics ('what is this', shapes, UIs, likeness), when you cannot see images, or as a second opinion. mode='stats': pixel stats only. mode='ocr': local OCR with pixel grounding. Heavier classical CV (contours, template matching, color segmentation, connected components, etc.) you can always write yourself in bash+python.",
+			"Look at an image file through a three-lane pipeline. The local lanes provide dimensions, approximate colors and layout, and OCR text. In [grid], ≡ marks high Sobel edge density. Default (no mode): pixel stats + local OCR — check whether that answers your question before going further. mode='vlm' with a question: asks a vision model grounded with local stats and OCR — use for semantics ('what is this', shapes, UIs, likeness), when you cannot see images, or as a second opinion. mode='stats': pixel stats only. mode='ocr': local OCR with pixel grounding. Heavier classical CV (contours, template matching, color segmentation, connected components, etc.) you can always write yourself in bash+python.",
 		parameters: Type.Object({
 			path: Type.String({ description: "Image file path (png/jpg/webp/bmp)" }),
 			mode: Type.Optional(Type.String({ description: "Lane selection: auto (default) | stats | ocr | vlm" })),
