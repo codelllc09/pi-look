@@ -28,6 +28,7 @@
 	"files": [
 		"look.ts",
 		"paste.ts",
+		"pi-look.example.json",
 		"scripts/analyze.py",
 		"scripts/requirements.txt",
 		"README.md",

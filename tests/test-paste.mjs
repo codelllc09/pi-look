@@ -2,7 +2,7 @@
 import { execSync } from "node:child_process";
 import assert from "node:assert";
 import { randomUUID } from "node:crypto";
-import { rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,6 +12,24 @@ import { Container, getOsc8LinkAtColumn, setCapabilities, setCellDimensions, str
 const bundle = join(import.meta.dirname, "..", "paste.test.bundle.mjs");
 execSync(`npx esbuild ${join(import.meta.dirname, "..", "paste.ts")} --bundle --format=esm --platform=node --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui --outfile=${bundle}`, { stdio: "pipe" });
 const { figureLabelAtColumn, figureViewport, upgradePastePaths, default: registerPaste } = await import(bundle);
+
+const agent = mkdtempSync(join(tmpdir(), "pi-look-paste-test-"));
+process.env.PI_CODING_AGENT_DIR = agent;
+process.on("exit", () => rmSync(agent, { recursive: true, force: true }));
+const config = join(agent, "pi-look.json");
+const registrations = [];
+const mockPi = {
+	on(name) { registrations.push(name); },
+	registerMarkdownTransformer() { registrations.push("markdown"); },
+};
+writeFileSync(config, '{"paste":false}');
+registerPaste(mockPi);
+assert.deepEqual(registrations, []);
+writeFileSync(config, '{"paste":true}');
+registerPaste(mockPi);
+assert.ok(registrations.includes("input"));
+assert.ok(registrations.includes("markdown"));
+rmSync(config);
 
 const TMP = "/tmp";
 const U = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";

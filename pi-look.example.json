@@ -1,0 +1,8 @@
+{
+  "paste": true,
+  "takeover": true,
+  "visionModel": "zai-coding-cn/glm-5.3-flash",
+  "minAutoConf": 0.3,
+  "ocrTier": "v6-small",
+  "ocrTierRetry": true
+}

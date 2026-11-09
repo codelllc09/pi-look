@@ -12,8 +12,9 @@
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { CustomEditor, UserMessageComponent, resizeImage, type ExtensionAPI, type ResizedImage } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, UserMessageComponent, getAgentDir, resizeImage, type ExtensionAPI, type ResizedImage } from "@earendil-works/pi-coding-agent";
 import {
 	Container, Image, Text, getCapabilities, getCellDimensions, getImageDimensions, getOsc8LinkAtColumn, hyperlink,
 	matchesKey, stripTerminalSequences, truncateToWidth, visibleWidth, type Component, type EditorComponent,
@@ -535,7 +536,18 @@ export function upgradePastePaths(
 	return { text, images };
 }
 
+function pasteEnabled(): boolean {
+	try {
+		const config = JSON.parse(fs.readFileSync(join(getAgentDir(), "pi-look.json"), "utf8"));
+		return config?.paste !== false;
+	} catch {
+		return true;
+	}
+}
+
 export default function (pi: ExtensionAPI) {
+	if (!pasteEnabled()) return;
+
 	const tmp = os.tmpdir();
 	const references = pasteReferences(tmp);
 	const figures = new Map<string, number>();

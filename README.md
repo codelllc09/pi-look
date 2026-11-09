@@ -58,7 +58,7 @@ pre-analysis:
   `look`'s default output, with the vlm hint. Nested codemode calls keep the
   image block; analyzer failures pass the original result through.
 
-## Native paste (replaces third-party paste extensions)
+## Native paste
 
 Pi's own `Ctrl+V` writes pasted clipboard images to
 `/tmp/pi-clipboard-<uuid>.<ext>`. The editor shows `[fig1]`, `[fig2]`, and
@@ -88,13 +88,16 @@ in Kitty fullscreen. Typing, scrolling, or moving away within the same
 area closes it. It also closes after three seconds without a mouse move
 over the label. Both views use Pi's temporary image file.
 
-No chips, no cards, no rejection. If a third-party paste extension (e.g.
-pi-image-paste-cards) is installed, remove it — it rejects sends for text-only
-models outright, and both extensions compete on the input chain:
+### Compatibility with other paste extensions
 
-```bash
-pi remove npm:pi-image-paste-cards && pi update --extensions
-```
+Paste is enabled by default. Another paste extension may replace the same
+editor or process the same image on submit, causing missing figure labels
+or duplicate attachments.
+
+To let the other extension handle pasting, set `"paste": false` in
+[pi-look.json](#config), then run `/reload` or restart Pi. This disables
+`paste.ts` hooks, figure labels, and previews. The `look` tool can be used
+independently.
 
 ## Progress feedback for long calls (whitebox VLM)
 
@@ -115,10 +118,13 @@ non-streaming attempt.
 
 ## Config
 
-`<agent-dir>/pi-look.json` (all optional):
+Use [pi-look.example.json](./pi-look.example.json) as a starting point for
+`<agent-dir>/pi-look.json` (normally `~/.pi/agent/pi-look.json`). Merge any
+new fields into an existing file. All settings are optional.
 
 ```json
 {
+  "paste": true,
   "visionModel": "zai-coding-cn/glm-5.3-flash",
   "minAutoConf": 0.3,
   "takeover": true,
@@ -127,6 +133,9 @@ non-streaming attempt.
   "vlmEndpoints": { "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" }
 }
 ```
+
+Set `"takeover": false` separately if another extension handles attachments
+or image `read` results for text-only models. This disables both takeovers.
 
 `ocrTier` selects the OCR model tier: `v6-small` (default — PP-OCRv6 det+rec
 small, bundled in the `rapidocr` wheel, fully offline) or `v6-medium` /

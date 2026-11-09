@@ -64,6 +64,15 @@ Kitty 全屏会为可见标记显示小缩略图，其他模式显示图片标�
 打字、滚动、移到同区域的其他位置，或停留三秒无鼠标移动时收起。
 两种预览都沿用 Pi 的临时图片文件。
 
+### 与其他贴图扩展共用
+
+贴图功能默认开启。其他贴图扩展可能替换同一个编辑器，或在发送时重复
+处理同一张图，导致图片代号缺失或附件重复。
+
+要让其他扩展处理贴图，在 [pi-look.json](#配置) 中设置 `"paste": false`，
+再执行 `/reload` 或重启 Pi。这会关闭 `paste.ts` 的钩子、图片代号和预览。
+`look` 可以独立使用。
+
 ## 长调用的进度反馈（白盒执行）
 
 VLM 调用可能耗时数十秒（推理型判官 thinking 阶段一个字都不出）。
@@ -80,10 +89,13 @@ VLM 调用可能耗时数十秒（推理型判官 thinking 阶段一个字都不
 
 ## 配置
 
-`<agent-dir>/pi-look.json`（全部可选）：
+以 [pi-look.example.json](../pi-look.example.json) 为例，配置文件放在
+`<agent-dir>/pi-look.json`，通常是 `~/.pi/agent/pi-look.json`。
+已有配置时将所需字段并入原文件。所有字段均为可选。
 
 ```json
 {
+  "paste": true,
   "visionModel": "zai-coding-cn/glm-5.3-flash",
   "minAutoConf": 0.3,
   "takeover": true,
@@ -92,6 +104,9 @@ VLM 调用可能耗时数十秒（推理型判官 thinking 阶段一个字都不
   "vlmEndpoints": { "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" }
 }
 ```
+
+如果其他扩展也处理纯文本模型的图片附件或 `read` 读图结果，可单独设置
+`"takeover": false`，关闭这两种接管。
 
 `ocrTier` 选择 OCR 模型档位：`v6-small`（默认，PP-OCRv6 det+rec small，
 随 `rapidocr` wheel 捆绑、完全离线）或 `v6-medium` / `v5-mobile` /
