@@ -23,6 +23,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-cjk
-      - run: python -m pip install --disable-pip-version-check pillow rapidocr-onnxruntime
+      - run: python -m pip install --disable-pip-version-check pillow rapidocr
       - run: npm ci
       - run: npm publish --access public

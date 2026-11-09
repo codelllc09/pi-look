@@ -10,7 +10,7 @@ questions, with local-first lanes and a vision-model lane only when needed:
 | Lane | What | Cost |
 |---|---|---|
 | 0 · pixel stats | dimensions, theme, dominant colors, estimated text rows | ~50 ms, local |
-| 1 · OCR (RapidOCR) | verbatim text + per-line confidence + tofu-marker count | ~1–2 s, local, free |
+| 1 · OCR (RapidOCR, PP-OCRv6) | verbatim text + per-line confidence + tofu-marker count | ~1–2 s, local, free |
 | 2 · VLM relay | a configurable vision model, **grounded with Lane 0+1 output** | per call |
 
 ## Protocol
@@ -93,8 +93,15 @@ non-streaming attempt.
   "visionModel": "zai-coding-cn/glm-5.3-flash",
   "minAutoConf": 0.3,
   "takeover": true,
+  "ocrTier": "v6-small",
   "vlmEndpoints": { "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" }
 }
+```
+
+`ocrTier` selects the OCR model tier: `v6-small` (default — PP-OCRv6 det+rec
+small, bundled in the `rapidocr` wheel, fully offline) or `v6-medium` /
+`v5-mobile` / `v5-server` / `v4-mobile` (downloaded on first use). The
+EOL `rapidocr-onnxruntime` package (PP-OCRv4) is no longer used.
 ```
 
 `pythonPath` (optional) pins an explicit analyzer interpreter. Default:

@@ -57,6 +57,7 @@ interface LookConfig {
 	vlmThinking?: boolean; // default true; false sends thinking:disabled (faster, shallower)
 	vlmEndpoints?: Record<string, string>; // provider -> OpenAI-compatible chat endpoint; overrides the built-in fallback map
 	takeover?: boolean; // default true; image takeover for non-vision models (persist-to-path + read() relay)
+	ocrTier?: string; // analyzer OCR model tier; default "v6-small" (bundled, offline). Others: v6-medium | v5-mobile | v5-server | v4-mobile (download on first use)
 }
 
 const DEFAULTS: LookConfig = {
@@ -126,7 +127,9 @@ function resolvePython(cfg: LookConfig): string {
 
 async function analyze(cfg: LookConfig, imgPath: string): Promise<Analysis> {
 	const script = path.join(import.meta.dirname, "scripts", "analyze.py");
-	const out = await runPython(resolvePython(cfg), [script, imgPath]);
+	const args = [script, imgPath];
+	if (cfg.ocrTier && cfg.ocrTier !== "v6-small") args.push(cfg.ocrTier); // analyzer defaults to v6-small
+	const out = await runPython(resolvePython(cfg), args);
 	return JSON.parse(out) as Analysis;
 }
 

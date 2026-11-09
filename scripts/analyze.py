@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
-"""pi-look analyzer — Lane 0 (pixel stats) + Lane 1 (RapidOCR) in one shot.
+"""pi-look analyzer — Lane 0 (pixel stats) + Lane 1 (RapidOCR, PP-OCRv6) in one shot.
 
 Prints a single JSON object to stdout. Exit codes: 0 ok, 2 usage, 3 image error.
 
 Lane 0 measures objective, pixel-level facts only (dimensions, dominant
 colors, estimated text rows via horizontal projection). It never interprets.
-Lane 1 runs RapidOCR and reports per-line confidence. Tofu markers (□,
-U+FDD0..U+FDEF, U+FFFD) are counted in the *recognized text*, where they are
-unambiguous characters — not guessed from pixels.
+Lane 1 runs RapidOCR (the `rapidocr` package; `rapidocr-onnxruntime` is EOL)
+and reports per-line confidence. Tofu markers (□, U+FDD0..U+FDEF, U+FFFD)
+are counted in the *recognized text*, where they are unambiguous characters
+— not guessed from pixels.
+
+Usage: analyze.py <image> [tier]
+  tier: v6-small (default, bundled in the wheel, offline) | v6-medium
+        | v5-mobile | v5-server | v4-mobile   (non-bundled tiers download
+        on first use; invalid tiers fall back to v6-small)
+Known v6 rec quirk: fullwidth punctuation may be normalized to halfwidth
+(：→:); spacing between CJK and latin runs is preserved as recognized.
 """
 import io
 import json
 import sys
-import unicodedata
 
 try:
     from PIL import Image
 except ImportError:
     print(
         "pi-look analyzer deps missing. Install for this interpreter, e.g.:\n"
-        "  uv pip install pillow rapidocr-onnxruntime\n"
-        "  pip install pillow rapidocr-onnxruntime",
+        "  uv pip install pillow rapidocr\n"
+        "  pip install pillow rapidocr",
         file=sys.stderr,
     )
     sys.exit(3)
@@ -87,44 +94,61 @@ def _is_tofu(ch: str) -> bool:
     return ch == "□" or ch == "\ufffd" or 0xFDD0 <= cp <= 0xFDEF
 
 
-def lane1(path: str) -> dict:
+def lane1(path: str, tier: str = "v6-small") -> dict:
     try:
-        from rapidocr_onnxruntime import RapidOCR
+        from rapidocr import RapidOCR, EngineType, ModelType, OCRVersion
     except Exception as e:  # pragma: no cover - environment dependent
         return {"available": False, "error": f"rapidocr unavailable: {e}", "lines": [], "avgConf": None, "text": "", "tofuCount": 0}
-    ocr = RapidOCR()
-    result, _ = ocr(path)
+    tiers = {
+        "v6-small": (OCRVersion.PPOCRV6, ModelType.SMALL),
+        "v6-medium": (OCRVersion.PPOCRV6, ModelType.MEDIUM),
+        "v5-mobile": (OCRVersion.PPOCRV5, ModelType.MOBILE),
+        "v5-server": (OCRVersion.PPOCRV5, ModelType.SERVER),
+        "v4-mobile": (OCRVersion.PPOCRV4, ModelType.MOBILE),
+    }
+    version, model_type = tiers.get(tier, tiers["v6-small"])
+    params = {}
+    for stage in ("Det", "Rec"):
+        params[f"{stage}.engine_type"] = EngineType.ONNXRUNTIME
+        params[f"{stage}.ocr_version"] = version
+        params[f"{stage}.model_type"] = model_type
+    ocr = RapidOCR(params=params)
+    result = ocr(path)
+    # numpy arrays: `or []` triggers ambiguous-truth ValueError — test against None
+    txts = list(result.txts) if result.txts is not None else []
+    scores = list(result.scores) if result.scores is not None else []
+    boxes = list(result.boxes) if result.boxes is not None else []
     lines = []
     tofu = 0
-    for item in result or []:
-        # RapidOCR items: [box, text, confidence]
+    for text, conf, box in zip(txts, scores, boxes):
         try:
-            text = str(item[1])
-            conf = float(item[2])
-            pts = [(float(p[0]), float(p[1])) for p in item[0]]
+            text = str(text)
+            conf = float(conf)
+            pts = [(float(p[0]), float(p[1])) for p in box]
             xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-            box = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
+            b = [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
         except Exception:
             continue
         tofu += sum(1 for c in text if _is_tofu(c))
-        lines.append({"conf": round(conf, 3), "text": text, "box": box})
+        lines.append({"conf": round(conf, 3), "text": text, "box": b})
     avg = round(sum(l["conf"] for l in lines) / len(lines), 3) if lines else None
     joined = "\n".join(l["text"] for l in lines)
     return {"available": True, "lines": lines, "avgConf": avg, "text": joined, "tofuCount": tofu}
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: analyze.py <image>", file=sys.stderr)
+    if len(sys.argv) not in (2, 3):
+        print("usage: analyze.py <image> [tier]", file=sys.stderr)
         return 2
     path = sys.argv[1]
+    tier = sys.argv[2] if len(sys.argv) == 3 else "v6-small"
     try:
         img = Image.open(io.open(path, "rb"))
         img.load()
     except Exception as e:
         print(json.dumps({"error": f"cannot open image: {e}"}))
         return 3
-    out = {"stats": lane0(img), "ocr": lane1(path)}
+    out = {"stats": lane0(img), "ocr": lane1(path, tier)}
     print(json.dumps(out, ensure_ascii=False))
     return 0
 

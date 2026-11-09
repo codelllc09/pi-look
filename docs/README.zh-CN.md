@@ -10,7 +10,7 @@
 | 车道 | 内容 | 成本 |
 |---|---|---|
 | 0 · 像素统计 | 尺寸、明暗主题、主色、估算文本行数 | ~50 ms，本地 |
-| 1 · OCR（RapidOCR） | 逐字文本 + 每行置信度 + 豆腐标记计数 | ~1–2 s，本地免费 |
+| 1 · OCR（RapidOCR，PP-OCRv6） | 逐字文本 + 每行置信度 + 豆腐标记计数 | ~1–2 s，本地免费 |
 | 2 · VLM 转发 | 可配置的视觉模型，**携带 Lane 0+1 输出作锚定** | 按次计费 |
 
 ## 协议
@@ -62,8 +62,15 @@ VLM 调用可能耗时数十秒（推理型判官 thinking 阶段一个字都不
   "visionModel": "zai-coding-cn/glm-5.3-flash",
   "minAutoConf": 0.3,
   "takeover": true,
+  "ocrTier": "v6-small",
   "vlmEndpoints": { "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" }
 }
+```
+
+`ocrTier` 选择 OCR 模型档位：`v6-small`（默认，PP-OCRv6 det+rec small，
+随 `rapidocr` wheel 捆绑、完全离线）或 `v6-medium` / `v5-mobile` /
+`v5-server` / `v4-mobile`（首次使用时联网下载）。已停更的
+`rapidocr-onnxruntime`（PP-OCRv4）不再使用。
 ```
 
 `pythonPath`（可选）钉死分析器解释器。默认自动解析：中央 uv venv

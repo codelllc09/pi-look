@@ -32,9 +32,13 @@ def find_cjk_font() -> str | None:
 CJK = find_cjk_font()
 
 
-def analyze(path: str) -> dict:
-    out = subprocess.run([PY, str(ROOT / "scripts" / "analyze.py"), path], capture_output=True, text=True, timeout=120)
+def analyze(path: str, tier: str | None = None) -> dict:
+    cmd = [PY, str(ROOT / "scripts" / "analyze.py"), path]
+    if tier:
+        cmd.append(tier)
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr
+    assert "usage:" not in out.stderr, "usage error leaked"
     return json.loads(out.stdout)
 
 
@@ -84,6 +88,20 @@ class AnalyzerTests(unittest.TestCase):
             out = subprocess.run([PY, str(ROOT / "scripts" / "analyze.py"), str(missing)], capture_output=True, text=True)
             self.assertEqual(out.returncode, 3)
             self.assertIn("error", out.stdout)
+
+    def test_invalid_tier_falls_back(self):
+        if not CJK:
+            self.skipTest("no CJK font found")
+        with tempfile.TemporaryDirectory() as td:
+            p = f"{td}/t.png"
+            make_text_image(p, ["pi-look unit 42"])
+            r = analyze(p, tier="bogus-tier")  # falls back to v6-small, still works
+            self.assertTrue(r["ocr"]["available"])
+            self.assertGreaterEqual(len(r["ocr"]["lines"]), 1)
+
+    def test_usage_error(self):
+        out = subprocess.run([PY, str(ROOT / "scripts" / "analyze.py")], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 2)
 
 
 if __name__ == "__main__":
