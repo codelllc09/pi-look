@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const bundle = join(import.meta.dirname, "..", "look.test.bundle.mjs");
 execSync(`npx esbuild ${join(import.meta.dirname, "..", "look.ts")} --bundle --format=esm --platform=node --external:@earendil-works/pi-coding-agent --external:typebox --outfile=${bundle}`, { stdio: "pipe" });
-const { shouldAutoEscalate, shouldTierRetry } = await import(bundle);
+const { shouldAutoEscalate, shouldTierRetry, fmtAnalysis } = await import(bundle);
 
 // Objective signal only: empty OCR escalates regardless of confidence floor.
 assert.equal(shouldAutoEscalate({ lines: [], avgConf: null }, 0.3), true);
@@ -36,3 +36,39 @@ assert.equal(shouldTierRetry(A(20, 5), "v6-medium"), false);
 assert.equal(shouldTierRetry(A(20, 5), "v4-mobile"), false);
 
 console.log("test-router: 14/14 passed");
+
+// ---- fmtAnalysis rendering (batch 3) ----
+const AX = {
+  stats: { width: 800, height: 300, theme: "dark", dominantColors: [{ hex: "#101014", share: 0.8 }], estimatedTextRows: 5 },
+  ocr: {
+    available: true, tier: "v6-small",
+    columns: 2, cjkShare: 0.61,
+    tables: [{ rows: [[0, 1], [2, 3]] }],
+    avgConf: 0.9, tofuCount: 0, text: "",
+    lines: [
+      { conf: 0.99, text: "名称", box: [10, 20, 60, 40], cjk: 1 },
+      { conf: 0.98, text: "数值", box: [200, 20, 250, 40], cjk: 1 },
+      { conf: 0.99, text: "资金", box: [10, 60, 60, 80], cjk: 1 },
+      { conf: 0.97, text: "430", box: [200, 60, 240, 80], cjk: 0 },
+      { conf: 0.42, text: "低置信行", box: [10, 120, 90, 140], cjk: 1 },
+    ],
+  },
+};
+let out = fmtAnalysis(AX);
+// header carries cjk + cols tags
+assert.ok(out.includes("[ocr] 5 lines, avgConf=0.9, cjk=61%, cols=2"), out.split("\n")[1]);
+// table rendered as markdown with separator; member lines not duplicated inline
+assert.ok(out.includes("| 名称 | 数值 |\n| --- | --- |\n| 资金 | 430 |"), out);
+assert.ok(!out.includes("[@10,20→60,40]"), "table line must not repeat inline");
+// low-confidence marker on the 0.42 line only
+assert.ok(out.includes("低置信行 ⟨0.42⟩"), out);
+assert.ok(!out.includes("名称 ⟨"), "0.99 must not carry a marker");
+// pipe in cell text is escaped
+const AP = { ocr: { available: true, lines: [{ conf: 0.99, text: "a|b" }], tables: [{ rows: [[0, 0]] }], avgConf: 0.99, tofuCount: 0, text: "" } };
+assert.ok(fmtAnalysis(AP).includes("| a\\|b |"));
+// tier tag only when retry won (tier differs from configured default)
+const AT = { ocr: { available: true, tier: "v6-medium", lines: [{ conf: 0.99, text: "x" }], tables: [], avgConf: 0.99, tofuCount: 0, text: "" } };
+assert.ok(fmtAnalysis(AT).includes("tier=v6-medium"));
+assert.ok(!fmtAnalysis(AT, { visionModel: "x/y", minAutoConf: 0.3, takeover: true, ocrTier: "v6-medium" }).includes("tier="));
+
+console.log("test-router: 25/25 passed");

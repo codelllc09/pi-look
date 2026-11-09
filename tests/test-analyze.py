@@ -52,6 +52,17 @@ def make_text_image(path: str, lines: list[str]) -> None:
     img.save(path)
 
 
+def make_layout_image(path: str, cells: list[tuple[int, int, str]], size: tuple[int, int] = (800, 220), bg=(18, 18, 22), fg=(230, 230, 230), fontsize=20) -> None:
+    """Place text cells at explicit (x, y) — for column/table layout tests."""
+    assert CJK, "no CJK font — caller must skip"
+    img = Image.new("RGB", size, bg)
+    d = ImageDraw.Draw(img)
+    f = ImageFont.truetype(CJK, fontsize)
+    for x, y, t in cells:
+        d.text((x, y), t, font=f, fill=fg)
+    img.save(path)
+
+
 class AnalyzerTests(unittest.TestCase):
     def test_text_image(self):
         if not CJK:
@@ -103,6 +114,57 @@ class AnalyzerTests(unittest.TestCase):
     def test_usage_error(self):
         out = subprocess.run([PY, str(ROOT / "scripts" / "analyze.py")], capture_output=True, text=True)
         self.assertEqual(out.returncode, 2)
+
+    def test_two_column_reading_order(self):
+        if not CJK:
+            self.skipTest("no CJK font found")
+        with tempfile.TemporaryDirectory() as td:
+            p = f"{td}/cols.png"
+            make_layout_image(p, [
+                (30, 20, "左栏甲行"), (30, 70, "左栏乙行"), (30, 120, "左栏丙行"),
+                (430, 20, "右栏甲行"), (430, 70, "右栏乙行"), (430, 120, "右栏丙行"),
+            ])
+            r = analyze(p)
+            o = r["ocr"]
+            self.assertEqual(o["columns"], 2)
+            self.assertEqual(len(o["lines"]), 6)
+            # column-major: the first three lines are the left column
+            self.assertTrue(all("左栏" in l["text"] for l in o["lines"][:3]), o["text"])
+            self.assertTrue(all("右栏" in l["text"] for l in o["lines"][3:]), o["text"])
+
+    def test_table_detection(self):
+        if not CJK:
+            self.skipTest("no CJK font found")
+        with tempfile.TemporaryDirectory() as td:
+            p = f"{td}/table.png"
+            make_layout_image(p, [
+                (40, 30, "名称"), (300, 30, "数值"), (560, 30, "备注"),
+                (40, 80, "资金"), (300, 80, "430"), (560, 80, "开局"),
+            ])
+            r = analyze(p)
+            o = r["ocr"]
+            self.assertEqual(len(o["tables"]), 1, f"tables={o['tables']}")
+            t = o["tables"][0]
+            self.assertEqual([len(row) for row in t["rows"]], [3, 3])
+            cells = [[o["lines"][i]["text"] for i in row] for row in t["rows"]]
+            self.assertIn("名称", cells[0])
+            self.assertIn("430", cells[1])
+
+    def test_cjk_fields(self):
+        if not CJK:
+            self.skipTest("no CJK font found")
+        with tempfile.TemporaryDirectory() as td:
+            p = f"{td}/t.png"
+            make_text_image(p, ["pi-look unit 42", "中文行识别测试"])
+            r = analyze(p)
+            o = r["ocr"]
+            self.assertGreater(o["cjkShare"], 0.2)
+            for l in o["lines"]:
+                self.assertIn("cjk", l)
+            en = next(l for l in o["lines"] if "pi-look" in l["text"])
+            zh = next(l for l in o["lines"] if "中文" in l["text"])
+            self.assertLess(en["cjk"], 0.1)
+            self.assertGreater(zh["cjk"], 0.9)
 
 
 if __name__ == "__main__":

@@ -111,7 +111,12 @@ function runPython(script: string, args: string[]): Promise<string> {
 
 interface Analysis {
 	stats?: { width: number; height: number; theme: string; dominantColors: { hex: string; share: number }[]; estimatedTextRows: number };
-	ocr?: { available: boolean; error?: string; tier?: string; lines: { conf: number; text: string; box?: number[] }[]; avgConf: number | null; text: string; tofuCount: number };
+	ocr?: {
+		available: boolean; error?: string; tier?: string;
+		lines: { conf: number; text: string; box?: number[]; cjk?: number }[];
+		avgConf: number | null; text: string; tofuCount: number;
+		columns?: number; cjkShare?: number; tables?: { rows: number[][] }[];
+	};
 	error?: string;
 }
 
@@ -314,7 +319,7 @@ export async function callVLM(cfg: LookConfig, question: string, imgPath: string
 	return r.text;
 }
 
-function fmtAnalysis(a: Analysis, cfg?: LookConfig): string {
+export function fmtAnalysis(a: Analysis, cfg?: LookConfig): string {
 	const s = a.stats, o = a.ocr;
 	const parts: string[] = [];
 	if (s) parts.push(`[stats] ${s.width}x${s.height} ${s.theme}-theme rows≈${s.estimatedTextRows} colors=${s.dominantColors.map((c) => `${c.hex}(${Math.round(c.share * 100)}%)`).join(" ")}`);
@@ -323,10 +328,24 @@ function fmtAnalysis(a: Analysis, cfg?: LookConfig): string {
 	else {
 		const defTier = cfg?.ocrTier ?? "v6-small";
 		const tierTag = o.tier && o.tier !== defTier ? `, tier=${o.tier}` : ""; // tier retry won
-		parts.push(`[ocr] ${o.lines.length} lines, avgConf=${o.avgConf ?? "n/a"}${tierTag}${o.tofuCount ? `, tofuMarkers=${o.tofuCount}` : ""}`);
-		for (const l of o.lines) {
+		const cjkTag = o.cjkShare && o.cjkShare > 0 ? `, cjk=${Math.round(o.cjkShare * 100)}%` : "";
+		const colsTag = o.columns && o.columns > 1 ? `, cols=${o.columns}` : "";
+		parts.push(`[ocr] ${o.lines.length} lines, avgConf=${o.avgConf ?? "n/a"}${tierTag}${cjkTag}${colsTag}${o.tofuCount ? `, tofuMarkers=${o.tofuCount}` : ""}`);
+		// Table member lines render as markdown tables below — not repeated inline.
+		const inTable = new Set<number>();
+		for (const t of o.tables ?? []) for (const row of t.rows) for (const li of row) inTable.add(li);
+		o.lines.forEach((l, i) => {
+			if (inTable.has(i)) return;
 			const at = l.box ? `[@${l.box[0]},${l.box[1]}→${l.box[2]},${l.box[3]}]` : "";
-			parts.push(`${at} ${l.text}`);
+			const low = l.conf < 0.8 ? ` ⟨${l.conf.toFixed(2)}⟩` : "";
+			parts.push(`${at} ${l.text}${low}`);
+		});
+		for (const t of o.tables ?? []) {
+			const md = t.rows.map((row, ri) => {
+				const cells = row.map((li) => (o.lines[li]?.text ?? "").replace(/\|/g, "\\|"));
+				return ri === 0 ? `| ${cells.join(" | ")} |\n|${cells.map(() => " --- ").join("|")}|` : `| ${cells.join(" | ")} |`;
+			});
+			parts.push(md.join("\n"));
 		}
 	}
 	return parts.join("\n");

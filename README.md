@@ -10,7 +10,7 @@ questions, with local-first lanes and a vision-model lane only when needed:
 | Lane | What | Cost |
 |---|---|---|
 | 0 · pixel stats | dimensions, theme, dominant colors, estimated text rows | ~50 ms, local |
-| 1 · OCR (RapidOCR, PP-OCRv6) | verbatim text + per-line confidence + tofu-marker count | ~1–2 s, local, free |
+| 1 · OCR (RapidOCR, PP-OCRv6) | verbatim text in reading order, column count, markdown tables, low-conf markers, CJK share, tofu-marker count | ~1–2 s, local, free |
 | 2 · VLM relay | a configurable vision model, **grounded with Lane 0+1 output** | per call |
 
 ## Protocol
@@ -24,6 +24,11 @@ questions, with local-first lanes and a vision-model lane only when needed:
   model has its own vision (`mode="vlm"` remains available as second opinion).
 - `mode="stats" | "ocr"` force a single lane. Useful even for vision models:
   exact numbers eyes estimate poorly (verbatim text, counts, colors).
+- OCR output is layout-aware: lines come in reading order (column-major,
+  columns left-to-right; full-width lines bridge columns and collapse to
+  plain top-down), aligned multi-box rows render as markdown tables
+  (conservative ≥2×2 + left-edge alignment gate), lines below 0.8 confidence
+  carry a `⟨0.42⟩` marker, and the header shows CJK share and column count.
 - Heavier classical CV (contours, template matching, color segmentation,
   connected components, etc.) stays in the model's bash+python domain by design.
 
