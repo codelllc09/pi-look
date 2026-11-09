@@ -9,5 +9,5 @@
 		"allowImportingTsExtensions": true,
 		"types": ["node"]
 	},
-	"include": ["look.ts"]
+	"include": ["look.ts", "paste.ts"]
 }

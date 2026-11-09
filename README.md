@@ -27,6 +27,46 @@ questions, with local-first lanes and a vision-model lane only when needed:
 - Heavier classical CV (contours, template matching, color segmentation,
   connected components, etc.) stays in the model's bash+python domain by design.
 
+## Takeover for text-only models
+
+With no vision in the active model, pi strips image content into omission
+placeholders, and `read` on an image returns "the image will be omitted".
+With `takeover` (default on) pi-look takes over instead — model-driven, zero
+pre-analysis:
+
+- **input**: base64 attachments (CLI `@file`, RPC) are persisted to
+  `/tmp/pi-look-<uuid>.<ext>`, referenced by path in the text, and the
+  attachment stripped — the model calls `look` itself only if it wants to.
+  TUI-pasted images are already paths (pi's own behavior); vision models are
+  never touched.
+- **read relay**: when a text-only model `read()`s an image (an explicit
+  request), lane 0+1 analysis is served in the result — same shape as
+  `look`'s default output, with the vlm hint. Nested codemode calls keep the
+  image block; analyzer failures pass the original result through.
+
+## Native paste (replaces third-party paste extensions)
+
+pi's own `Ctrl+V` writes pasted clipboard images to
+`/tmp/pi-clipboard-<uuid>.<ext>` and inserts the path into the prompt —
+exactly the path protocol text-only models need (they call `look`
+themselves). The bundled `paste.ts` extension completes the picture for
+vision models:
+
+- **vision model**: paste artifacts (`/tmp/pi-clipboard-*`, `/tmp/pi-look-*`)
+  found in the input are upgraded to real image attachments; the path text
+  stays as `[image: <path>]` so the model can still call `look` for the exact
+  numbers eyes estimate poorly.
+- **text-only model**: untouched — the path protocol plus the takeover
+  surfaces above own that flow end to end.
+
+No chips, no cards, no rejection. If a third-party paste extension (e.g.
+pi-image-paste-cards) is installed, remove it — it rejects sends for text-only
+models outright, and both extensions compete on the input chain:
+
+```bash
+pi remove npm:pi-image-paste-cards && pi update --extensions
+```
+
 ## Progress feedback for long calls (whitebox VLM)
 
 VLM calls can take tens of seconds (reasoning judges emit nothing while
@@ -52,6 +92,7 @@ non-streaming attempt.
 {
   "visionModel": "zai-coding-cn/glm-5.3-flash",
   "minAutoConf": 0.3,
+  "takeover": true,
   "vlmEndpoints": { "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" }
 }
 ```
@@ -78,7 +119,7 @@ pi install npm:pi-look
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # analyzer (python) + router + VLM streaming (mock endpoint) tests
+npm test            # analyzer (python) + router + takeover + paste + VLM streaming tests
 ```
 
 The analyzer test picks its interpreter in order: `$PI_LOOK_PY` →

@@ -16,9 +16,23 @@
  * Config: <agent-dir>/pi-look.json
  *   { "visionModel": "zai-coding-cn/glm-5.3-flash",   // provider/id, user-set
  *     "pythonPath": "python3",                        // optional, auto-resolved
- *     "minAutoConf": 0.3 }
+ *     "minAutoConf": 0.3,
+ *     "takeover": true }                              // image takeover for non-vision models
  * API key is read from <agent-dir>/auth.json[provider].key; no key is ever
  * written or logged. Endpoint map is in ENDPOINTS below.
+ *
+ * Takeover for text-only models (model-driven, zero pre-analysis): when the
+ * active model has no vision, pi strips image content into placeholders and
+ * read() on an image returns an "omitted" note. pi-look takes over instead —
+ *   input        non-vision model + base64 attachments → persist each to
+ *                /tmp/pi-look-<uuid>.<ext>, reference the paths in the text,
+ *                strip the attachments (kills the omission placeholder). The
+ *                model then calls look itself if it wants the content.
+ *   tool_result  non-vision model read()s an image (an explicit request) →
+ *                serve lane 0+1 analysis in the result, same shape as look's
+ *                default output, plus the vlm hint. Nested (codemode) calls
+ *                and analyzer failures pass the original result through —
+ *                never trade the omission note for an error.
  *
  * Whitebox VLM calls (pi-hear convention): execute() takes the host's
  * (signal, onUpdate). With onUpdate the VLM request streams (SSE) — deltas
@@ -35,7 +49,6 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-
 interface LookConfig {
 	visionModel: string; // "provider/model-id"
 	pythonPath?: string; // explicit interpreter; auto-resolved otherwise
@@ -43,11 +56,13 @@ interface LookConfig {
 	vlmMaxTokens?: number; // default 8192; reasoning judges burn hidden tokens first
 	vlmThinking?: boolean; // default true; false sends thinking:disabled (faster, shallower)
 	vlmEndpoints?: Record<string, string>; // provider -> OpenAI-compatible chat endpoint; overrides the built-in fallback map
+	takeover?: boolean; // default true; image takeover for non-vision models (persist-to-path + read() relay)
 }
 
 const DEFAULTS: LookConfig = {
 	visionModel: "zai-coding-cn/glm-5.3-flash",
 	minAutoConf: 0.3,
+	takeover: true,
 };
 
 /** OpenAI-compatible chat endpoints per provider in auth.json. */
@@ -61,7 +76,9 @@ const expand = (p: string) => (p.startsWith("~/") ? path.join(os.homedir(), p.sl
 
 /** Tracked so the auto lane never spends a VLM call on a model with its own eyes. */
 let currentModel: { provider?: string; id?: string; input?: ("text" | "image")[] } | undefined;
-const visionCapable = () => Array.isArray(currentModel?.input) && currentModel.input.includes("image");
+/** The models-store `input` declaration is authoritative — never infer vision from a model name. */
+const modelHasVision = (m: { input?: ("text" | "image")[] } | undefined) => Array.isArray(m?.input) && m.input.includes("image");
+const visionCapable = () => modelHasVision(currentModel);
 
 function loadConfig(): LookConfig {
 	try {
@@ -111,6 +128,21 @@ async function analyze(cfg: LookConfig, imgPath: string): Promise<Analysis> {
 	const script = path.join(import.meta.dirname, "scripts", "analyze.py");
 	const out = await runPython(resolvePython(cfg), [script, imgPath]);
 	return JSON.parse(out) as Analysis;
+}
+
+/** Analyzer memo (resolved path + mtime + size) — repeat reads (retries, lookups) stay free. Bounded FIFO. */
+const analysisCache = new Map<string, { mtimeMs: number; size: number; a: Analysis }>();
+async function analyzeCached(cfg: LookConfig, imgPath: string): Promise<Analysis> {
+	let st: fs.Stats | undefined;
+	try { st = fs.statSync(imgPath); } catch { st = undefined; }
+	const hit = analysisCache.get(imgPath);
+	if (st && hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.a;
+	const a = await analyze(cfg, imgPath);
+	if (st) {
+		if (analysisCache.size >= 32) analysisCache.delete(analysisCache.keys().next().value ?? "");
+		analysisCache.set(imgPath, { mtimeMs: st.mtimeMs, size: st.size, a });
+	}
+	return a;
 }
 
 function apiKey(provider: string): string {
@@ -268,15 +300,94 @@ function fmtAnalysis(a: Analysis): string {
 	return parts.join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// Takeover helpers (exported for tests)
+// ---------------------------------------------------------------------------
+
+/** File extension for an image mime type; png fallback keeps the data inspectable. */
+export function imageExtForMime(mimeType: string | undefined): string {
+	switch ((mimeType ?? "").split(";")[0].trim().toLowerCase()) {
+		case "image/jpeg": return "jpg";
+		case "image/webp": return "webp";
+		case "image/gif": return "gif";
+		case "image/bmp": return "bmp";
+		default: return "png";
+	}
+}
+
+/** Drop the host's non-vision omission note lines from a read result text; keep factual lines. */
+export function stripOmissionNote(text: string): string {
+	return text
+		.split("\n")
+		.filter((l) => !l.includes("does not support images") && !l.includes("will be omitted"))
+		.join("\n")
+		.trim();
+}
+
+/** Compose the takeover replacement for a read-image result — same shape as look's default output. */
+export function mergeReadTakeover(readNote: string, analysis: string): string {
+	return [stripOmissionNote(readNote), analysis, `[hint] semantics needed? call look(path, mode="vlm", question="...")`]
+		.filter(Boolean)
+		.join("\n\n");
+}
+
 export default function (pi: ExtensionAPI) {
 	const cfg = loadConfig();
 
 	pi.on("session_start", async (_e, ctx) => { currentModel = ctx.model; });
 	pi.on("model_select", async (e) => { currentModel = e.model; });
 
+	// Takeover, surface A — non-vision model + base64 attachments: persist each
+	// image to /tmp, reference the path in the text, strip the attachment (the
+	// host would serialize it into an omission placeholder anyway). Persist
+	// failures keep their attachment — nothing is ever lost. The model routes
+	// itself: it calls look on the path only if it wants the content.
+	pi.on("input", async (event, ctx) => {
+		if (!cfg.takeover || event.source === "extension" || modelHasVision(ctx.model ?? currentModel)) return;
+		const images = event.images ?? [];
+		if (images.length === 0) return;
+		const lines: string[] = [];
+		const kept: typeof images = [];
+		for (const img of images) {
+			try {
+				const p = path.join(os.tmpdir(), `pi-look-${crypto.randomUUID()}.${imageExtForMime(img.mimeType)}`);
+				fs.writeFileSync(p, Buffer.from(img.data, "base64"));
+				lines.push(`[image: ${p}]`);
+			} catch {
+				kept.push(img);
+			}
+		}
+		if (lines.length === 0) return;
+		const text = event.text ? `${event.text}\n${lines.join("\n")}` : lines.join("\n");
+		return { action: "transform", text, images: kept };
+	});
+
+	// Takeover, surface B — a non-vision model read()s an image (explicit
+	// request for content): serve lane 0+1 in place of the stripped image block,
+	// same shape as look's default output. Nested (codemode) calls expect the
+	// image block programmatically — leave them alone. Analyzer failure passes
+	// the original result through; the omission note is never traded for an error.
+	pi.on("tool_result", async (event, ctx) => {
+		if (!cfg.takeover || event.toolName !== "read" || event.parentToolCallId) return;
+		if (modelHasVision(ctx.model ?? currentModel)) return; // ctx.model is authoritative at hook time
+		if (!Array.isArray(event.content) || !event.content.some((c) => c?.type === "image")) return;
+		const raw = typeof event.input?.["path"] === "string" ? String(event.input["path"]) : "";
+		if (!raw) return;
+		const img = path.resolve(ctx.cwd ?? process.cwd(), expand(raw.replace(/^@/, "")));
+		if (!fs.existsSync(img)) return;
+		let a: Analysis;
+		try { a = await analyzeCached(cfg, img); } catch { return; }
+		const note = event.content.find((c) => c.type === "text");
+		return { content: [{ type: "text", text: mergeReadTakeover(note && "text" in note ? note.text : "", fmtAnalysis(a)) }] };
+	});
+
 	pi.registerTool({
 		name: "look",
 		label: "look",
+		promptSnippet: "Inspect image files — local pixel stats + OCR, VLM relay on demand",
+		promptGuidelines: [
+			"When the conversation references an image path and you cannot see images natively, call look(path): local pixel stats and verbatim OCR answer most questions. Add mode=\"vlm\" with a question only when visual semantics are needed.",
+		],
 		description:
 			"Look at an image file through a three-lane pipeline. Useful even if you can already see images: the stats/OCR lanes give EXACT numbers your eyes estimate poorly (dimensions, colors, verbatim text, counts). Default (no mode): pixel stats + local OCR — cheap and local; check whether that answers your question before going further. mode='vlm' with a question: asks a vision model grounded with the local OCR — use for semantics ('what is this', shapes, UIs, likeness), when you cannot see images, or as a second opinion. mode='stats'/'ocr': force one lane. Heavier classical CV (contours, template matching, color segmentation, connected components, etc.) you can always write yourself in bash+python.",
 		parameters: Type.Object({

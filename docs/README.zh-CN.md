@@ -26,6 +26,19 @@
 - 更重的经典 CV（轮廓、模板匹配、颜色分割、连通域等）刻意留在模型
   自己的 bash+python 域内。
 
+## 纯文本模型接管
+
+当前模型无视觉时，pi 会把图像内容剥成占位符，`read` 读图也只得到
+“该图像将从本次请求中移除”。开启 `takeover`（默认开）后由 pi-look
+接管——模型驱动，零预分析：
+- **input 接管**：base64 附件（CLI `@file`、RPC）落盘为
+  `/tmp/pi-look-<uuid>.<ext>`，文本里引用路径，附件剥空——模型想要
+  内容时自行调 `look`。TUI 贴图本来就是路径（pi 自身行为）；
+  视觉模型零介入。
+- **read 接管**：纯文本模型 `read()` 图像（显式请求内容）时，结果
+  直接换成 Lane 0+1 分析——与 `look` 默认输出同构，附 vlm 提示。
+  codemode 嵌套调用保留图像块；分析器失败则原样放行。
+
 ## 长调用的进度反馈（白盒执行）
 
 VLM 调用可能耗时数十秒（推理型判官 thinking 阶段一个字都不出）。
@@ -48,6 +61,7 @@ VLM 调用可能耗时数十秒（推理型判官 thinking 阶段一个字都不
 {
   "visionModel": "zai-coding-cn/glm-5.3-flash",
   "minAutoConf": 0.3,
+  "takeover": true,
   "vlmEndpoints": { "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" }
 }
 ```
@@ -77,7 +91,7 @@ uv pip install -r scripts/requirements.txt   # 或你习惯的 pip/venv 方式
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # 分析器（python）+ 路由器 + VLM 流式（mock 端点）测试
+npm test            # 分析器（python）+ 路由器 + 接管 + 贴图 + VLM 流式测试
 ```
 
 分析器测试按顺序选解释器：`$PI_LOOK_PY` →
