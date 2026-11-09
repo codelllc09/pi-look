@@ -155,7 +155,7 @@ def lane1(path: str, tier: str = "v6-small") -> dict:
         lines.append({"conf": round(conf, 3), "text": text, "box": b})
     avg = round(sum(l["conf"] for l in lines) / len(lines), 3) if lines else None
     joined = "\n".join(l["text"] for l in lines)
-    return {"available": True, "lines": lines, "avgConf": avg, "text": joined, "tofuCount": tofu}
+    return {"available": True, "tier": tier, "lines": lines, "avgConf": avg, "text": joined, "tofuCount": tofu}
 
 
 def main() -> int:

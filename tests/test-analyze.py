@@ -65,6 +65,7 @@ class AnalyzerTests(unittest.TestCase):
             self.assertLessEqual(abs(r["stats"]["estimatedTextRows"] - 2), 1)
             self.assertTrue(r["ocr"]["available"])
             self.assertGreaterEqual(len(r["ocr"]["lines"]), 2)
+            self.assertEqual(r["ocr"]["tier"], "v6-small")  # provenance: which tier ran
             self.assertGreater(r["ocr"]["avgConf"], 0.5)
             self.assertIn("pi-look", r["ocr"]["text"])
             for line in r["ocr"]["lines"]:

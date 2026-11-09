@@ -94,6 +94,7 @@ non-streaming attempt.
   "minAutoConf": 0.3,
   "takeover": true,
   "ocrTier": "v6-small",
+  "ocrTierRetry": true,
   "vlmEndpoints": { "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" }
 }
 ```
@@ -102,6 +103,13 @@ non-streaming attempt.
 small, bundled in the `rapidocr` wheel, fully offline) or `v6-medium` /
 `v5-mobile` / `v5-server` / `v4-mobile` (downloaded on first use). The
 EOL `rapidocr-onnxruntime` package (PP-OCRv4) is no longer used.
+
+`ocrTierRetry` (default `true`): when the default tier finds at most half
+the text rows the pixel lane estimates (dense tables/documents where det
+merged lines), `look` retries once with `v6-medium` and keeps whichever
+pass found more lines; the winning tier is shown as `tier=…` in the OCR
+header. Latency caveat: a retry on a large image can take 10–15 s, and
+line-less photos can fire the gate — set `false` to disable.
 ```
 
 `pythonPath` (optional) pins an explicit analyzer interpreter. Default:

@@ -10,6 +10,24 @@ of this commit for the generator inline). Known failure to regress:
 Ruling recorded: default judge = glm-5.3-flash (user config). Re-run this
 corpus when swapping judges; add every real-world misjudgment as a fixture.
 
+## Batch-2 ruling (2026-11-09): preprocessing stays rejected; narrow tier-retry gate added
+
+Fresh experiments alongside the PP-OCRv6 swap (batch 0):
+- Dark-theme inversion: ra2 avgConf 0.803→0.880, ZERO new lines, 站 worse
+  (0.635→0.577); judge2 degraded (行A→行 A). Not the "new evidence" the
+  2026-11-01 ruling requires — inversion joins upscale/unsharp on the banned
+  list. Do not re-try without new evidence.
+- v6-medium tier on ra2: finds 资金 430 @1.0 (small misses it entirely) but
+  DEGRADES 红警HBK08→红警08, bilibili→bilibii; 15.1s on 1166x668 (10-35x
+  small). Judge1 tofu □U+FDD0→□U+FDDO regresses. Medium is a tradeoff, not
+  an upgrade — stays a manual `ocrTier` option.
+- Adopted (user ruling): retry once with v6-medium ONLY when the default
+  tier finds ≤ half the estimated text rows (dense tables/docs where det
+  merged lines); winner = strictly more lines; `ocrTierRetry: false` kills
+  it. Note: ra2's rows estimate is 1 (tiny HUD text vanishes in the 480px
+  projection), so the gate does NOT fire there — ra2 remains a VLM-lane
+  case, not a preprocessing case.
+
 ## Negative result (2026-11-01): OCR preprocessing rejected
 
 Tried pi-read-image-style preprocessing against the OOL fixture:

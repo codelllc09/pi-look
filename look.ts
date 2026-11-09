@@ -58,6 +58,7 @@ interface LookConfig {
 	vlmEndpoints?: Record<string, string>; // provider -> OpenAI-compatible chat endpoint; overrides the built-in fallback map
 	takeover?: boolean; // default true; image takeover for non-vision models (persist-to-path + read() relay)
 	ocrTier?: string; // analyzer OCR model tier; default "v6-small" (bundled, offline). Others: v6-medium | v5-mobile | v5-server | v4-mobile (download on first use)
+	ocrTierRetry?: boolean; // default true; when the default tier finds ≤ half the estimated text rows, retry once with v6-medium
 }
 
 const DEFAULTS: LookConfig = {
@@ -110,7 +111,7 @@ function runPython(script: string, args: string[]): Promise<string> {
 
 interface Analysis {
 	stats?: { width: number; height: number; theme: string; dominantColors: { hex: string; share: number }[]; estimatedTextRows: number };
-	ocr?: { available: boolean; error?: string; lines: { conf: number; text: string; box?: number[] }[]; avgConf: number | null; text: string; tofuCount: number };
+	ocr?: { available: boolean; error?: string; tier?: string; lines: { conf: number; text: string; box?: number[] }[]; avgConf: number | null; text: string; tofuCount: number };
 	error?: string;
 }
 
@@ -125,12 +126,38 @@ function resolvePython(cfg: LookConfig): string {
 	return pyCache;
 }
 
-async function analyze(cfg: LookConfig, imgPath: string): Promise<Analysis> {
+async function analyze(cfg: LookConfig, imgPath: string, forceTier?: string): Promise<Analysis> {
 	const script = path.join(import.meta.dirname, "scripts", "analyze.py");
+	const tier = forceTier ?? (cfg.ocrTier && cfg.ocrTier !== "v6-small" ? cfg.ocrTier : undefined); // analyzer defaults to v6-small
 	const args = [script, imgPath];
-	if (cfg.ocrTier && cfg.ocrTier !== "v6-small") args.push(cfg.ocrTier); // analyzer defaults to v6-small
+	if (tier) args.push(tier);
 	const out = await runPython(resolvePython(cfg), args);
 	return JSON.parse(out) as Analysis;
+}
+
+/** Narrow weak-signal gate (batch 2, user-ruled 2026-11-09): the default tier
+ *  found at most half the row bands the pixel lane estimates — det likely
+ *  merged or missed lines (dense tables/documents). Escalate once to
+ *  v6-medium. Photos with 0 lines can also fire (documented latency caveat);
+ *  a non-default configured tier opts out entirely. Exported for tests. */
+export function shouldTierRetry(a: Analysis, configuredTier: string | undefined): boolean {
+	if (configuredTier && configuredTier !== "v6-small") return false;
+	const rows = a.stats?.estimatedTextRows ?? 0;
+	const lines = a.ocr?.lines.length ?? 0;
+	if (rows < 4) return false;
+	return lines <= Math.floor(rows / 2);
+}
+
+/** analyze + one-shot tier escalation; the retry wins only on strictly more
+ *  lines, is best-effort (never fails the run), and never re-runs lane 0. */
+async function analyzeWithRetry(cfg: LookConfig, imgPath: string): Promise<Analysis> {
+	const a = await analyze(cfg, imgPath);
+	if (cfg.ocrTierRetry === false || !shouldTierRetry(a, cfg.ocrTier)) return a;
+	try {
+		const b = await analyze(cfg, imgPath, "v6-medium");
+		if ((b.ocr?.lines.length ?? 0) > (a.ocr?.lines.length ?? 0)) return b;
+	} catch { /* retry is best-effort — keep the first pass */ }
+	return a;
 }
 
 /** Analyzer memo (resolved path + mtime + size) — repeat reads (retries, lookups) stay free. Bounded FIFO. */
@@ -287,14 +314,16 @@ export async function callVLM(cfg: LookConfig, question: string, imgPath: string
 	return r.text;
 }
 
-function fmtAnalysis(a: Analysis): string {
+function fmtAnalysis(a: Analysis, cfg?: LookConfig): string {
 	const s = a.stats, o = a.ocr;
 	const parts: string[] = [];
 	if (s) parts.push(`[stats] ${s.width}x${s.height} ${s.theme}-theme rows≈${s.estimatedTextRows} colors=${s.dominantColors.map((c) => `${c.hex}(${Math.round(c.share * 100)}%)`).join(" ")}`);
 	if (!o) return parts.join("\n");
 	if (!o.available) parts.push(`[ocr] unavailable: ${o.error}`);
 	else {
-		parts.push(`[ocr] ${o.lines.length} lines, avgConf=${o.avgConf ?? "n/a"}${o.tofuCount ? `, tofuMarkers=${o.tofuCount}` : ""}`);
+		const defTier = cfg?.ocrTier ?? "v6-small";
+		const tierTag = o.tier && o.tier !== defTier ? `, tier=${o.tier}` : ""; // tier retry won
+		parts.push(`[ocr] ${o.lines.length} lines, avgConf=${o.avgConf ?? "n/a"}${tierTag}${o.tofuCount ? `, tofuMarkers=${o.tofuCount}` : ""}`);
 		for (const l of o.lines) {
 			const at = l.box ? `[@${l.box[0]},${l.box[1]}→${l.box[2]},${l.box[3]}]` : "";
 			parts.push(`${at} ${l.text}`);
@@ -381,7 +410,7 @@ export default function (pi: ExtensionAPI) {
 		let a: Analysis;
 		try { a = await analyzeCached(cfg, img); } catch { return; }
 		const note = event.content.find((c) => c.type === "text");
-		return { content: [{ type: "text", text: mergeReadTakeover(note && "text" in note ? note.text : "", fmtAnalysis(a)) }] };
+		return { content: [{ type: "text", text: mergeReadTakeover(note && "text" in note ? note.text : "", fmtAnalysis(a, cfg)) }] };
 	});
 
 	pi.registerTool({
@@ -411,21 +440,23 @@ export default function (pi: ExtensionAPI) {
 			try {
 				if (mode === "vlm") {
 					const a = await analyze(cfg, img);
-					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely.", img, fmtAnalysis(a), vopts);
+					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely.", img, fmtAnalysis(a, cfg), vopts);
 					if (taskId) writeStatus(taskId, 1, 1, `vlm done · ${answer.length} chars`, vopts.owner);
-					return { content: [{ type: "text", text: answer + `\n\n[grounding used]\n${fmtAnalysis(a).slice(0, 600)}` }], details: undefined };
+					return { content: [{ type: "text", text: answer + `\n\n[grounding used]\n${fmtAnalysis(a, cfg).slice(0, 600)}` }], details: undefined };
 				}
-				const a = await analyze(cfg, img);
+				// Tier-retry gate serves text extraction (auto/ocr); stats-only and vlm
+				// grounding paths skip it (no OCR consumer / vlm has its own eyes).
+				const a = mode === "stats" ? await analyze(cfg, img) : await analyzeWithRetry(cfg, img);
 				if (mode === "auto" && shouldAutoEscalate(a.ocr ?? { lines: [], avgConf: null }, cfg.minAutoConf)) {
 					if (visionCapable()) {
 						// Never spend a VLM call on a model with its own eyes (explicit mode=vlm still allowed).
-						return { content: [{ type: "text", text: fmtAnalysis(a) + `\n\n[hint] OCR found little; you have vision — inspect the image yourself, or call look(path, mode="vlm", question="...") for a second opinion.` }], details: undefined };
+						return { content: [{ type: "text", text: fmtAnalysis(a, cfg) + `\n\n[hint] OCR found little; you have vision — inspect the image yourself, or call look(path, mode="vlm", question="...") for a second opinion.` }], details: undefined };
 					}
-					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely; OCR found little or no text.", img, fmtAnalysis(a), vopts);
+					const answer = await callVLM(cfg, args.question?.trim() || "Describe this image precisely; OCR found little or no text.", img, fmtAnalysis(a, cfg), vopts);
 					if (taskId) writeStatus(taskId, 1, 1, `vlm done · ${answer.length} chars`, vopts.owner);
-					return { content: [{ type: "text", text: `[auto→vlm: ocr empty/low-conf]\n${answer}\n\n[grounding used]\n${fmtAnalysis(a).slice(0, 600)}` }], details: undefined };
+					return { content: [{ type: "text", text: `[auto→vlm: ocr empty/low-conf]\n${answer}\n\n[grounding used]\n${fmtAnalysis(a, cfg).slice(0, 600)}` }], details: undefined };
 				}
-				return { content: [{ type: "text", text: fmtAnalysis(a) + `\n\n[hint] semantics needed? call look(path, mode="vlm", question="...")` }], details: undefined };
+				return { content: [{ type: "text", text: fmtAnalysis(a, cfg) + `\n\n[hint] semantics needed? call look(path, mode="vlm", question="...")` }], details: undefined };
 			} catch (e) {
 				if (taskId) removeStatus(taskId);
 				const msg = e instanceof Error ? e.message : String(e);

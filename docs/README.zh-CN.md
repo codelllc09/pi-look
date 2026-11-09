@@ -63,6 +63,7 @@ VLM 调用可能耗时数十秒（推理型判官 thinking 阶段一个字都不
   "minAutoConf": 0.3,
   "takeover": true,
   "ocrTier": "v6-small",
+  "ocrTierRetry": true,
   "vlmEndpoints": { "zai-coding-cn": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions" }
 }
 ```
@@ -71,6 +72,12 @@ VLM 调用可能耗时数十秒（推理型判官 thinking 阶段一个字都不
 随 `rapidocr` wheel 捆绑、完全离线）或 `v6-medium` / `v5-mobile` /
 `v5-server` / `v4-mobile`（首次使用时联网下载）。已停更的
 `rapidocr-onnxruntime`（PP-OCRv4）不再使用。
+
+`ocrTierRetry`（默认 `true`）：当默认档位找到的行数不足像素车道估
+计的一半（密集表格/文档、det 合并行）时，`look` 用 `v6-medium` 重试
+一次，取行数多者；胜出档位以 `tier=…` 显示在 OCR 头行。延迟注意：
+大图重试可能耗时 10–15 秒，无文本照片也可能触发门控——设 `false`
+可关闭。
 ```
 
 `pythonPath`（可选）钉死分析器解释器。默认自动解析：中央 uv venv
