@@ -60,6 +60,11 @@ const AST = { stats: { width: 800, height: 600, theme: "dark", dominantColors: [
 const sout = fmtAnalysis(AST);
 assert.ok(sout.includes("[structure] bg=#101014 ink=#e8e8e8 colorfulness=low accent=#ff5c5c(3%) cols=2 rowGap≈26px(regular)"), sout.split("\n")[1]);
 assert.ok(sout.includes("[grid 4x2]\n·▒▓R\n▓▓░·"), sout);
+// blobs token renders compactly
+const AB = { stats: { width: 800, height: 600, theme: "dark", dominantColors: [], estimatedTextRows: 3, blobs: { count: 24, size: "small", uniform: true, skew: "left" } }, ocr: { available: true, lines: [], tables: [], avgConf: null, tofuCount: 0, text: "" } };
+assert.ok(fmtAnalysis(AB).includes("blobs=24 small-uniform left"));
+const AB2 = { stats: { width: 800, height: 600, theme: "dark", dominantColors: [], estimatedTextRows: 3, blobs: { count: 1, size: "large", uniform: null, skew: null } }, ocr: { available: true, lines: [], tables: [], avgConf: null, tofuCount: 0, text: "" } };
+assert.ok(fmtAnalysis(AB2).includes("blobs=1 large"));
 // trivial structure stays silent (no structure/grid lines)
 const AMIN = { stats: { width: 800, height: 600, theme: "dark", dominantColors: [], estimatedTextRows: 0 }, ocr: { available: true, lines: [], tables: [], avgConf: null, tofuCount: 0, text: "" } };
 const mout = fmtAnalysis(AMIN);
@@ -82,4 +87,4 @@ const AT = { ocr: { available: true, tier: "v6-medium", lines: [{ conf: 0.99, te
 assert.ok(fmtAnalysis(AT).includes("tier=v6-medium"));
 assert.ok(!fmtAnalysis(AT, { visionModel: "x/y", minAutoConf: 0.3, takeover: true, ocrTier: "v6-medium" }).includes("tier="));
 
-console.log("test-router: 32/32 passed");
+console.log("test-router: 34/34 passed");

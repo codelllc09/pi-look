@@ -9,7 +9,7 @@ questions, with local-first lanes and a vision-model lane only when needed:
 
 | Lane | What | Cost |
 |---|---|---|
-| 0 · pixel stats + structure | dimensions, theme, bg/ink colors, colorfulness, accents, column bands, row-gap regularity, density/hue grid thumbnail | ~50 ms, local |
+| 0 · pixel stats + structure | dimensions, theme, bg/ink colors, colorfulness, accents, column bands, row-gap regularity, ink blobs, texture-aware grid thumbnail | ~50 ms, local |
 | 1 · OCR (RapidOCR, PP-OCRv6) | verbatim text in reading order, column count, markdown tables, low-conf markers, CJK share, tofu-marker count | ~1–2 s, local, free |
 | 2 · VLM relay | a configurable vision model, **grounded with Lane 0+1 output** | per call |
 
@@ -33,10 +33,12 @@ questions, with local-first lanes and a vision-model lane only when needed:
   connected components, etc.) stays in the model's bash+python domain by design.
 - Lane 0 is structure-aware: `[structure]` reports bg/ink separation,
   colorfulness, grayscale, saturated accent colors, pixel-projection column
-  count and row-gap regularity; `[grid WxH]` is a compact density/hue
-  thumbnail (·░▒▓█ + RGBYCM letters) that gives text-only models a first
-  look at WHERE content sits — still pure pixel statistics, never
-  interpretation.
+  count, row-gap regularity, and ink-blob statistics (count, dominant size
+  class, uniformity, horizontal skew); `[grid WxH]` is a compact thumbnail
+  — `·░▒▓█` ink mass, `≡` fine texture (glyph/edge density via Sobel),
+  RGBYCM hue letters for strongly colored cells — giving text-only models a
+  first look at WHERE content sits and whether dense areas are text or flat
+  graphics. Still pure pixel statistics, never interpretation.
 
 ## Takeover for text-only models
 

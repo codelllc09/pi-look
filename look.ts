@@ -116,6 +116,7 @@ interface Analysis {
 		bg?: string; ink?: string | null; colorfulness?: string; gray?: boolean;
 		accent?: { hex: string; share: number }[]; columns?: number;
 		rowGap?: number; rowGapRegular?: boolean;
+		blobs?: { count: number; size?: "small" | "medium" | "large"; uniform?: boolean | null; skew?: "left" | "right" | null } | null;
 		grid?: { cols: number; rows: number; cells: string[] };
 	};
 	ocr?: {
@@ -340,6 +341,7 @@ export function fmtAnalysis(a: Analysis, cfg?: LookConfig): string {
 		for (const a of s.accent ?? []) st.push(`accent=${a.hex}(${Math.round(a.share * 100)}%)`);
 		if (s.columns && s.columns > 1) st.push(`cols=${s.columns}`);
 		if (s.rowGap && s.rowGapRegular) st.push(`rowGap≈${s.rowGap}px(regular)`);
+		if (s.blobs) st.push(`blobs=${s.blobs.count}${s.blobs.size ? ` ${s.blobs.size}` : ""}${s.blobs.uniform ? "-uniform" : ""}${s.blobs.skew ? ` ${s.blobs.skew}` : ""}`);
 		if (st.length) parts.push(`[structure] ${st.join(" ")}`);
 		if (s.grid && s.grid.cells.length) parts.push(`[grid ${s.grid.cols}x${s.grid.rows}]\n${s.grid.cells.join("\n")}`);
 	}

@@ -56,12 +56,88 @@ def _otsu(gray: "np.ndarray") -> tuple[int, bool]:
     return best_t, best_var > 0
 
 
+def _sobel_mag(gray: "np.ndarray") -> "np.ndarray":
+    """Sobel gradient magnitude (pure numpy slicing, no scipy/cv2)."""
+    g = gray.astype(np.float32)
+    gx = np.zeros_like(g)
+    gy = np.zeros_like(g)
+    gx[1:-1, 1:-1] = (g[:-2, 2:] + 2 * g[1:-1, 2:] + g[2:, 2:]) - (g[:-2, :-2] + 2 * g[1:-1, :-2] + g[2:, :-2])
+    gy[1:-1, 1:-1] = (g[2:, :-2] + 2 * g[2:, 1:-1] + g[2:, 2:]) - (g[:-2, :-2] + 2 * g[:-2, 1:-1] + g[:-2, 2:])
+    return np.hypot(gx, gy)
+
+
+def _blob_stats(mask: "np.ndarray") -> dict | None:
+    """Run-based connected components over the ink mask (union-find +
+    two-pointer overlap). Returns compact objective facts: count, dominant
+    size class, area uniformity, horizontal skew. None when nothing or the
+    mask is noise-dense (>20k runs — photos)."""
+    h, w = mask.shape
+    parent: list[int] = []
+    runs: list[tuple[int, int, int]] = []  # (start, end, row)
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    prev: list[int] = []  # run indexes of the previous row
+    for y in range(h):
+        row = mask[y]
+        d = np.diff(np.concatenate(([0], row.astype(np.int8), [0])))
+        starts = np.flatnonzero(d == 1)
+        ends = np.flatnonzero(d == -1)
+        cur: list[int] = []
+        for s, e in zip(starts.tolist(), ends.tolist()):
+            idx = len(runs)
+            runs.append((s, e, y))
+            parent.append(idx)
+            cur.append(idx)
+        # two-pointer union with overlapping previous-row runs (both sorted by start)
+        pi = 0
+        for idx in cur:
+            s0, e0, _ = runs[idx]
+            while pi < len(prev) and runs[prev[pi]][1] <= s0:
+                pi += 1
+            pj = pi
+            while pj < len(prev) and runs[prev[pj]][0] < e0:
+                ri, rj = find(idx), find(prev[pj])
+                if ri != rj:
+                    parent[ri] = rj
+                pj += 1
+        prev = cur
+    if len(runs) > 20000 or not runs:
+        return None
+
+    area: dict[int, int] = {}
+    cxw: dict[int, int] = {}  # centroid-x weight (sum of run center × length)
+    for i, (s, e, y) in enumerate(runs):
+        r = find(i)
+        area[r] = area.get(r, 0) + (e - s)
+        cxw[r] = cxw.get(r, 0) + (s + e) // 2 * (e - s)
+    kept = {r: a for r, a in area.items() if a >= 8}
+    if not kept:
+        return None
+    total_px = w * h
+    classes = {"small": 0, "medium": 0, "large": 0}
+    areas = []
+    for a in kept.values():
+        areas.append(a)
+        classes["small" if a < 0.01 * total_px else "medium" if a < 0.08 * total_px else "large"] += 1
+    size = max(classes, key=lambda k: classes[k])
+    arr = np.array(areas, dtype=np.float64)
+    uniform = bool(arr.std() / arr.mean() < 0.5) if len(arr) > 2 else None
+    centroid = sum(cxw[r] for r in kept) / sum(kept.values())
+    skew = "left" if centroid < 0.35 * w else "right" if centroid > 0.65 * w else None
+    return {"count": len(kept), "size": size, "uniform": uniform, "skew": skew}
+
+
 def _hex(c) -> str:
     r, g, b = (int(max(0, min(255, round(float(v))))) for v in c)
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def _structure(rgb480: "np.ndarray", mask: "np.ndarray", valid: bool, bands_raw: list, gh: int, h: int, small: Image.Image, dom: list) -> dict:
+def _structure(rgb480: "np.ndarray", gray: "np.ndarray", mask: "np.ndarray", valid: bool, bands_raw: list, gh: int, h: int, small: Image.Image, dom: list) -> dict:
     """Objective structure facts derived from pixels: bg/ink separation,
     colorfulness, grayscale, accent colors, column bands, row-gap regularity,
     and a density/hue grid thumbnail. Never interprets."""
@@ -121,6 +197,8 @@ def _structure(rgb480: "np.ndarray", mask: "np.ndarray", valid: bool, bands_raw:
     xbands = [b for b in xbands if (b[1] - b[0]) >= 0.05 * mask.shape[1]]
     out["columns"] = min(len(xbands), 5) if len(xbands) >= 2 else 1
 
+    out["blobs"] = _blob_stats(mask) if valid else None
+
     # Row-gap regularity (display scale = original px).
     if len(bands_raw) >= 3:
         starts = [b[0] for b in bands_raw]
@@ -129,16 +207,21 @@ def _structure(rgb480: "np.ndarray", mask: "np.ndarray", valid: bool, bands_raw:
             out["rowGap"] = int(round(float(np.median(gaps)) * h / gh))
             out["rowGapRegular"] = bool(float(gaps.std() / gaps.mean()) < 0.15)
 
-    # Grid thumbnail: density chars, hue letters for strongly colored cells.
+    # Grid thumbnail: density chars, texture char for edge-dense cells
+    # (fine text/glyph texture vs flat mass), hue letters for strong colors.
+    edge = _sobel_mag(gray) > 48
     gw, ghh = mask.shape[1], mask.shape[0]
     cn, rn = min(8, max(1, gw // 40)), min(6, max(1, ghh // 40))
     rows = []
     for r in range(rn):
         s = ""
         for c in range(cn):
-            cell = mask[r * ghh // rn : (r + 1) * ghh // rn, c * gw // cn : (c + 1) * gw // cn]
+            ys, ye = r * ghh // rn, (r + 1) * ghh // rn
+            xs, xe = c * gw // cn, (c + 1) * gw // cn
+            cell = mask[ys:ye, xs:xe]
             d = float(cell.mean()) if cell.size else 0.0
-            mean_rgb = f[r * ghh // rn : (r + 1) * ghh // rn, c * gw // cn : (c + 1) * gw // cn].mean(axis=(0, 1))
+            de = float(edge[ys:ye, xs:xe].mean()) if cell.size else 0.0
+            mean_rgb = f[ys:ye, xs:xe].mean(axis=(0, 1))
             mx, mn = float(mean_rgb.max()), float(mean_rgb.min())
             if mx > 0 and (mx - mn) / mx > 0.30 and d >= 0.02:
                 hi = [i for i, v in enumerate(mean_rgb) if v == mx]
@@ -155,6 +238,8 @@ def _structure(rgb480: "np.ndarray", mask: "np.ndarray", valid: bool, bands_raw:
                 else:
                     ch = "B"
                 s += ch
+            elif de >= 0.10:
+                s += "≡"  # fine texture (glyphs), not flat mass
             else:
                 s += "·" if d < 0.05 else "░" if d < 0.2 else "▒" if d < 0.5 else "▓" if d < 0.8 else "█"
         rows.append(s)
@@ -217,10 +302,10 @@ def lane0(img: Image.Image) -> dict:
         "theme": "dark" if dark_bg else "light",
         "dominantColors": dom,
         "estimatedTextRows": bands,
-        **{
+            **{
             k: v
             for k, v in _structure(
-                np.asarray(rgb.resize(gray_img.size)), mask, valid, bands_raw, gray.shape[0], h, small, dom
+                np.asarray(rgb.resize(gray_img.size)), gray, mask, valid, bands_raw, gray.shape[0], h, small, dom
             ).items()
         },
     }

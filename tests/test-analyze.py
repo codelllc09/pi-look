@@ -152,6 +152,32 @@ class AnalyzerTests(unittest.TestCase):
             self.assertIn("名称", cells[0])
             self.assertIn("430", cells[1])
 
+    def test_blob_stats(self):
+        with tempfile.TemporaryDirectory() as td:
+            # 3x3 grid of equal squares -> 9 small uniform blobs, no skew
+            p = f"{td}/squares.png"
+            img = Image.new("RGB", (480, 480), (250, 250, 250))
+            d = ImageDraw.Draw(img)
+            for r in range(3):
+                for c in range(3):
+                    x, y = 60 + c * 140, 60 + r * 140
+                    d.rectangle([x, y, x + 40, y + 40], fill=(20, 20, 20))
+            img.save(p)
+            b = analyze(p)["stats"].get("blobs")
+            self.assertIsNotNone(b)
+            self.assertEqual(b["count"], 9)
+            self.assertEqual(b["size"], "small")
+            self.assertTrue(b["uniform"])
+            self.assertIsNone(b["skew"])
+            # one big block -> a single large blob
+            p2 = f"{td}/block.png"
+            img2 = Image.new("RGB", (480, 480), (250, 250, 250))
+            ImageDraw.Draw(img2).rectangle([80, 80, 400, 400], fill=(20, 20, 20))
+            img2.save(p2)
+            b2 = analyze(p2)["stats"].get("blobs")
+            self.assertEqual(b2["count"], 1)
+            self.assertEqual(b2["size"], "large")
+
     def test_cjk_fields(self):
         if not CJK:
             self.skipTest("no CJK font found")
@@ -177,7 +203,7 @@ class AnalyzerTests(unittest.TestCase):
             self.assertTrue(s["gray"])
             self.assertEqual(s["colorfulness"], "low")
             self.assertIn("cells", s["grid"])
-            self.assertTrue(any(ch in "░▒▓█" for row in s["grid"]["cells"] for ch in row))
+            self.assertTrue(any(ch in "░▒▓█≡" for row in s["grid"]["cells"] for ch in row))  # ≡ = glyph texture since batch 5
             self.assertNotIn("accent", s)
             self.assertTrue(s["ink"], "ink must resolve on a text image")
             # saturated red block on gray bg: accent fires, colorful, not gray
